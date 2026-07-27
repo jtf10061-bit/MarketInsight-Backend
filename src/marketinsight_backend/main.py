@@ -2,6 +2,8 @@ from fastapi import FastAPI     # アプリ本体。app = FastAPI() でサーバ
 from fastapi.middleware.cors import CORSMiddleware      # CORS（Cross-Origin Resource Sharing）を許可するミドルウェア(ブラウザはセキュリティのため、異なるオリジン間の通信をデフォルトでブロックする)
 # CORS設定：別ドメイン（フロント側など）からのAPI呼び出しを許可する
 # （これがないとブラウザのセキュリティ機能で通信がブロックされてしまうため）
+from fastapi.responses import StreamingResponse     # レスポンスを一括ではなくストリーミングで返す
+
 from pydantic import BaseModel
 """
 リクエストのバリデーション（型チェック）用。ChatRequest で message: str と定義すると、FastAPIが自動的に:
@@ -9,6 +11,9 @@ from pydantic import BaseModel
     型が str か確認
     不正なら自動で422エラーを返す
 """
+import json
+import time
+
 from marketinsight_agent.react_loop import run # MCP-Agentのrunをimport
 
 
@@ -47,5 +52,10 @@ def health():
 
 @app.post("/chat")
 def chat(request: ChatRequest):
-    steps = run(request.message)
-    return {"steps": steps}
+    def generate():
+        for step in run(request.message):
+            yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+            time.sleep(1)
+    # steps = run(request.message)
+    # return {"steps": steps}
+    return StreamingResponse(generate(), media_type="text/event-stream")
