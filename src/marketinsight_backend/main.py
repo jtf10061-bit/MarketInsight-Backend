@@ -117,8 +117,12 @@ def api_add_message(user_id: str, chat_id: str, req: AddMessageRequest):
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+    history = [{"role": "user", "content": request.message}]
     def generate():
-        for step in run(request.message, []):
-            yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
-            time.sleep(1)
+        try:
+            for step in run(request.message, history):
+                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+                time.sleep(1)
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'answer', 'content': f'エラーが発生しました: {str(e)}'}, ensure_ascii=False)}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
