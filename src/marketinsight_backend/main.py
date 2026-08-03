@@ -14,6 +14,14 @@ from pydantic import BaseModel
 import json
 import time
 from marketinsight_agent.react_loop import run # MCP-Agentのrunをimport
+from marketinsight_history.chat_service import(
+    get_chats,
+    create_chat,
+    delete_chat,
+    toggle_favorite,
+    update_title,
+    add_message,
+)
 
 """
 FastAPIは
@@ -39,28 +47,78 @@ app.add_middleware(
 # → 第1引数にミドルウェアのクラスを取り、第2引数以降にはミドルウェアに渡したいキーワード引数を取る
 # classを使ってmessageの型定義をしている
 
+# history = []
+
 class ChatRequest(BaseModel):
     message: str
 
-history = []
+class CreateChatRequest(BaseModel):
+    id: str
+    title: str
+    date: str
+    user_id: str
+
+class UpdateTitleRequest(BaseModel):
+    title: str
+
+class AddMessageRequest(BaseModel):
+    role: str
+    content: str
+
+
+"""
+@app.〇〇(): デコレータ。「このURLにこのHTTPメソッドでリクエストが来たら、この関数を実行する」というルーティング定義
+例：
+@app.get("/chats/{user_id}")    # GET /chats/test-user にアクセスしたら
+def api_get_chats(user_id: str): # この関数を実行する
+    return get_chats(user_id)
+
+HTTPメソッドごとの使い分け：
+デコレータ	    HTTPメソッド    用途
+@app.get()	  GET	         データの取得
+@app.post()	  POST	         データの作成
+@app.patch()  PATCH	         データの一部更新
+@app.delete() DELETE	     データの削除
+"""
 
 @app.get("/health")
 # health(): サーバーが正常に動いているか確認するためのヘルスチェックエンドポイント
 def health():
     return {"status": "ok"}
 
+@app.get("/chats/{user_id}")
+def api_get_chats(user_id: str):
+    return get_chats(user_id)
+
+@app.post("/chats")
+def api_create_chat(req: CreateChatRequest):
+    create_chat(req.user_id, req.id, req.title, req.date)
+    return {"status": "ok"}
+
+@app.delete("/chats/{user_id}/{chat_id}")
+def api_delete_chat(user_id: str, chat_id: str):
+    delete_chat(user_id, chat_id)
+    return {"status": "ok"}
+
+@app.patch("/chats/{user_id}/{chat_id}/favorite")
+def api_toggle_favorite(user_id: str, chat_id: str):
+    toggle_favorite(user_id, chat_id)
+    return {"status": "ok"}
+
+@app.patch("/chats/{user_id}/{chat_id}/title")
+def api_toggle_title(user_id: str, chat_id: str, req: UpdateTitleRequest):
+    update_title(user_id, chat_id, req.title)
+    return {"status": "ok"}
+
+@app.post("/chats/{user_id}/{chat_id}/messages")
+def api_add_message(user_id: str, chat_id: str, req: AddMessageRequest):
+    add_message(user_id, chat_id, req.role, req.content)
+    return {"status": "ok"}
+
 @app.post("/chat")
 def chat(request: ChatRequest):
-    history.append({"role": "user", "content": request.message})
-
     def generate():
-        answer = ""
-        for step in run(request.message, history):
+        for step in run(request.message, []):
             yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
             time.sleep(1)
-            if step["type"] == "answer":
-                answer = step["content"]
-        history.append({"role": "assistant", "content": answer})
-    # steps = run(request.message)
-    # return {"steps": steps}
     return StreamingResponse(generate(), media_type="text/event-stream")
