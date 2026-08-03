@@ -13,9 +13,7 @@ from pydantic import BaseModel
 """
 import json
 import time
-
 from marketinsight_agent.react_loop import run # MCP-Agentのrunをimport
-
 
 """
 FastAPIは
@@ -44,6 +42,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
 
+history = []
 
 @app.get("/health")
 # health(): サーバーが正常に動いているか確認するためのヘルスチェックエンドポイント
@@ -52,10 +51,16 @@ def health():
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+    history.append({"role": "user", "content": request.message})
+
     def generate():
-        for step in run(request.message):
+        answer = ""
+        for step in run(request.message, history):
             yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
             time.sleep(1)
+            if step["type"] == "answer":
+                answer = step["content"]
+        history.append({"role": "assistant", "content": answer})
     # steps = run(request.message)
     # return {"steps": steps}
     return StreamingResponse(generate(), media_type="text/event-stream")
