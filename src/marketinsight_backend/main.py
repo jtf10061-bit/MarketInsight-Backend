@@ -21,6 +21,7 @@ from marketinsight_history.chat_service import(
     toggle_favorite,
     update_title,
     add_message,
+    get_messages,
 )
 
 """
@@ -49,8 +50,10 @@ app.add_middleware(
 
 # history = []
 
+USER_ID = "test-user"
 class ChatRequest(BaseModel):
     message: str
+    chat_id: str = ""
 
 class CreateChatRequest(BaseModel):
     id: str
@@ -117,7 +120,18 @@ def api_add_message(user_id: str, chat_id: str, req: AddMessageRequest):
 
 @app.post("/chat")
 def chat(request: ChatRequest):
-    history = [{"role": "user", "content": request.message}]
+    # history = [{"role": "user", "content": request.message}]
+    history = []
+    if request.chat_id:
+        try:
+            from marketinsight_history.chat_service import get_messages
+            history = get_messages(USER_ID, request.chat_id)
+        except Exception:
+            pass
+    if not history or history[-1].get("content") != request.message:
+        history.append({"role": "user", "content": request.message})
+
+
     def generate():
         try:
             for step in run(request.message, history):
