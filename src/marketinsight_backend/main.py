@@ -23,6 +23,8 @@ from marketinsight_history.chat_service import(
     add_message,
     get_messages,
 )
+from marketinsight_agent.config import MODELS
+
 
 """
 FastAPIは
@@ -54,6 +56,7 @@ USER_ID = "test-user"
 class ChatRequest(BaseModel):
     message: str
     chat_id: str = ""
+    model: str = "aoai-gpt-4.1-mini"
 
 class CreateChatRequest(BaseModel):
     id: str
@@ -134,9 +137,13 @@ def chat(request: ChatRequest):
 
     def generate():
         try:
-            for step in run(request.message, history):
+            for step in run(request.message, history, model=request.model):
                 yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
                 time.sleep(1)
         except Exception as e:
             yield f"data: {json.dumps({'type': 'answer', 'content': f'エラーが発生しました: {str(e)}'}, ensure_ascii=False)}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+@app.get("/models")
+def get_models():
+    return MODELS
