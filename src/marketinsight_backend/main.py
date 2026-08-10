@@ -52,11 +52,11 @@ app.add_middleware(
 
 # history = []
 
-USER_ID = "test-user"
 class ChatRequest(BaseModel):
     message: str
     chat_id: str = ""
     model: str = "aoai-gpt-4.1-mini"
+    user_id: str = ""
 
 class CreateChatRequest(BaseModel):
     id: str
@@ -128,7 +128,7 @@ def chat(request: ChatRequest):
     if request.chat_id:
         try:
             from marketinsight_history.chat_service import get_messages
-            history = get_messages(USER_ID, request.chat_id)
+            history = get_messages(request.user_id, request.chat_id)
         except Exception:
             pass
     if not history or history[-1].get("content") != request.message:
