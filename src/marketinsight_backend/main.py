@@ -141,7 +141,7 @@ def chat(request: ChatRequest):
                 yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
                 time.sleep(1)
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'answer', 'content': f'エラーが発生しました: {str(e)}'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'content': f'エラーが発生しました: {str(e)}'}, ensure_ascii=False)}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.get("/models")
