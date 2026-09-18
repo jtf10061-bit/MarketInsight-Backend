@@ -1,6 +1,12 @@
 # os: ファイルパスの結合やディレクトリ操作
 import os
 
+# re: 正規表現。「第1章」のような見出し書式の判定に使う
+import re
+
+# collections: Counterで「一番多く使われているフォントサイズ」を数えるのに使う
+import collections
+
 # fitz: PyMuPDFのライブラリ。PDFを開いてテキストを抽出する
 import fitz
 
@@ -60,39 +66,222 @@ EMBEDDING_MODEL = os.getenv("AZURE_OPENAI_EMBEDDING_MODEL", "text-embedding-ada-
 # "text-embedding-ada-002 → 環境変数があればそれを使い("AZURE_OPENAI_EMBEDDING_MODEL")、なければ"text-embedding-ada-002"をデフォルト値とする
 
 
-def extract_text_from_pdf(file_path: str) -> str:
-    """PDFからテキストを抽出する"""
-    # doc: fitz.open(file_path)で開いたPDFオブジェクト
-    # PDFのページを1ページずつ順番に取り出すループ
-    # docはイテラブル(for分で回せる=要素を1つずつ順番に取り出すことができるオブジェクト)で、各pageは1ページ分のオブジェクト
+# 見出しらしい書き方のパターン  例: 第1章 / 第１条 / 1.2 / ３．
+HEADING_PATTERN = re.compile(
+    r"^(第[0-9０-９一二三四五六七八九十]+[編章節条項]|[0-9]+(\.[0-9]+)*[\s　]|[０-９]+[．.])"
+)
+
+# 見出しに見えるが中身が無いノイズ  例: 「2021 年4 月1 日制定」「第二十版」「12」
+NOISE_PATTERN = re.compile(r"^[\d０-９\s　年月日改訂制定版第\.\-/]+$")
+
+
+def extract_lines(file_path: str) -> list[dict]:
+    """PDFを「行」単位で抽出する
+
+    以前の extract_text_from_pdf は全ページを1本の文字列に連結していたため、
+    「このテキストが何ページの何行目か」という情報が失われていた。
+    行単位で取り出すことで、参照元として page / line_no を示せるようになる。
+
+    返り値の1要素 = 1行
+        page    : ページ番号(1始まり)
+        line_no : そのページ内で何行目か(1始まり)
+        text    : 行のテキスト
+        size    : その行の最大フォントサイズ(見出し判定に使う)
+        bold    : 太字が含まれるか
+    """
     doc = fitz.open(file_path)
-    text = ""
-    for page in doc:
-        text += page.get_text()
-        # get_text(): そのページ内のテキストを文字列として抽出するメソッド
-        # text += 抽出したテキストをtext変数に連結していく
+    lines = []
+    # enumerate(doc, start=1): ページを1始まりの番号付きで回す
+    for page_index, page in enumerate(doc, start=1):
+        # get_text("dict"): ページの中身を「ブロック > 行 > スパン」の入れ子辞書で取得する
+        #   span = 同じフォント・同じサイズが続くひとかたまり。ここに size と flags が入っている
+        line_no = 0
+        for block in page.get_text("dict")["blocks"]:
+            # 画像ブロックには "lines" が無いので .get() で安全に取る
+            for line in block.get("lines", []):
+                # 1行は複数スパンに分かれることがあるので連結する
+                text = "".join(span["text"] for span in line["spans"]).strip()
+                if not text:
+                    continue
+                line_no += 1
+                lines.append(
+                    {
+                        "page": page_index,
+                        "line_no": line_no,
+                        "text": text,
+                        "size": max(round(span["size"], 1) for span in line["spans"]),
+                        # flags の 4bit目(=16)が立っていると太字
+                        "bold": any(span["flags"] & 16 for span in line["spans"]),
+                    }
+                )
     doc.close()
-    return text
+    return lines
 
 
-def split_info_chunks(text: str, chunk_size: int = 500, overlap: int = 100) -> list[str]:
-    # chunk_size=500: 1チャンクの文字列(デフォルトで500文字)
-    # overlap: チャンク間の重複文字列(デフォルトで100文字)
-    # overlapがある理由：100文字ずつ重複することで、文の境目で意味が途切れるのを防ぐ
+def detect_body_size(lines: list[dict]) -> float:
+    """本文のフォントサイズを推定する
+
+    考え方: 文書の大半は本文なので「使われている文字数が多いサイズ」= 本文。
+
+    ただし最頻の1サイズだけを本文とすると失敗する文書がある。
+    例: 本文が 9.0 と 10.0 の2サイズで組まれているPDFでは、9.0 だけを本文とみなすと
+        10.0 の本文まで「本文より大きい=見出し」と誤判定されてしまう。
+    そこで「全体の10%以上の文字数を占めるサイズ」はすべて本文グループとみなし、
+    その中の最大サイズを返す。これより大きいものだけが見出し候補になる。
     """
-    長いテキストをチャンク(小さな塊に)に分割する
-    ↓
-    Embeddingモデルには、入力長の制限があり、かつ検索精度を上げるために分割が必要
+    counter = collections.Counter()
+    for line in lines:
+        counter[line["size"]] += len(line["text"])
+    if not counter:
+        return 0.0
+
+    total = sum(counter.values())
+    body_sizes = [size for size, count in counter.items() if count / total >= 0.1]
+    if not body_sizes:
+        # どのサイズも10%に満たない場合は、従来どおり最頻サイズを本文とする
+        return counter.most_common(1)[0][0]
+    return max(body_sizes)
+
+
+def is_heading(line: dict, body_size: float) -> bool:
+    """1行が見出しかどうかを判定する"""
+    text = line["text"]
+    # 長すぎる行は本文。短すぎる行は記号などのゴミ
+    if len(text) > 60 or len(text) < 2:
+        return False
+    # 日付・版数だけの行(改訂履歴表など)は除外
+    if NOISE_PATTERN.match(text):
+        return False
+    # 句点・読点で終わる行は文であって見出しではない
+    # (「6.1.3 で対応する。」のような数字始まりの本文を弾くのに効く)
+    if text[-1] in "。、.":
+        return False
+    # 「発行元:○○」「調査期間:○○」のようなメタ情報行を除外する
+    # (見出しにコロンが入ることは稀なため)
+    if "：" in text or ":" in text:
+        return False
+    # 1. 本文より明らかに大きい
+    if line["size"] > body_size * 1.1:
+        return True
+    # 2. 太字かつ本文より大きい
+    #    (本文と同じ大きさの太字は「本文中の強調」であることが多いので見出しにしない)
+    if line["bold"] and line["size"] > body_size:
+        return True
+    # 3. サイズでは区別できないが「第1条」などの書式に一致(規程類がこれ)
+    return bool(HEADING_PATTERN.match(text))
+
+
+def find_toc_pages(lines: list[dict], body_size: float) -> set:
+    """目次ページのページ番号を集める
+
+    目次ページには章タイトルがずらりと並ぶため、見出し検出をそのまま走らせると
+    目次の行を「本文中の章」と誤認してしまう。そこで目次ページは検出対象から外す。
+
+    目次は複数ページに渡ることがあるので、「目次」と書かれたページだけでなく、
+    そこから連続する「ほとんどの行が見出しに見えるページ」も目次とみなす。
     """
-    chunks = []  # 結果を入れる配列
-    start = 0  # 切り出し開始位置
-    # text: 分割したいものテキスト
-    while start < len(text):  # テキストの最後まで繰り返す
-        end = start + chunk_size  # 終了位置 = 開始位置 + 500
-        chunk = text[start:end]  # start~endの範囲を切り出す
-        if chunk.strip():  # chunkが空白でなければ
-            chunks.append(chunk)  # リストに追加
-        start = end - overlap  # 次の開始位置 = 終了位置 - 100(100も自分もどる)
+    # ページ番号 → そのページの行リスト
+    by_page = collections.defaultdict(list)
+    for line in lines:
+        by_page[line["page"]].append(line)
+
+    # 「目次」とだけ書かれた行を持つページが目次の起点
+    starts = {
+        line["page"]
+        for line in lines
+        if line["text"].replace(" ", "").replace("　", "") == "目次"
+    }
+
+    toc_pages = set(starts)
+    for start in starts:
+        page = start + 1
+        # 起点の次ページ以降、見出しらしい行が過半を占める間は目次の続きとみなす
+        while page in by_page:
+            page_lines = by_page[page]
+            heading_count = sum(1 for line in page_lines if is_heading(line, body_size))
+            if not page_lines or heading_count / len(page_lines) < 0.5:
+                break
+            toc_pages.add(page)
+            page += 1
+    return toc_pages
+
+
+def assign_sections(lines: list[dict], body_size: float) -> None:
+    """各行に「直前に現れた見出し」を section として付与する(リストを直接書き換える)
+
+    見出し検出はあくまで推定なので誤りが混ざる。ただしページ番号と行番号は常に正しいので、
+    section がずれても「どこを見ればよいか」は失われない、という前提の設計。
+    """
+    toc_pages = find_toc_pages(lines, body_size)
+    current = ""  # 直近の見出し。まだ1つも出てきていなければ空文字
+    for line in lines:
+        if line["page"] not in toc_pages and is_heading(line, body_size):
+            current = line["text"]
+        line["section"] = current
+
+
+def split_into_chunks(
+    lines: list[dict], chunk_size: int = 500, overlap: int = 100, min_chunk_size: int = 200
+) -> list[dict]:
+    """行のリストをチャンク(小さな塊)に分割する
+
+    以前の split_info_chunks は文字数だけで機械的に切っていたため、
+    チャンクが「どのページの何行目か」を持てなかった。
+    行を積み上げる方式にすることで、チャンク先頭行から page / line / section を引き継げる。
+
+    返り値の1要素 = 1チャンク
+        content    : 本文
+        page       : 開始ページ / page_end: 終了ページ
+        line_start : 開始ページ内の開始行 / line_end: 終了ページ内の終了行
+        section    : そのチャンクが属する章(取れなければ空文字)
+
+    章の切り替わりはチャンクを区切る「候補」として扱う。ただし min_chunk_size に
+    満たないうちは区切らない。見出し検出には誤りが混ざるため、章が変わるたびに
+    必ず切ると数十文字の細切れチャンクが大量にでき、検索精度が落ちるため。
+    """
+    chunks = []
+    start = 0  # 今のチャンクが lines の何番目から始まるか
+    while start < len(lines):
+        length = 0
+        end = start
+        # chunk_size 文字を超えるまで行を足す。length == 0 の条件で「最低1行は必ず入れる」
+        # (1行が chunk_size より長い場合でも進めるようにするため)
+        section = lines[start].get("section", "")
+        while end < len(lines) and (length == 0 or length + len(lines[end]["text"]) <= chunk_size):
+            # 章が切り替わったらそこでチャンクを確定する。
+            # 1チャンクに複数の章が混ざると、先頭行の章が全体のラベルになってしまい
+            # 「参照元の章」が実態とずれるため
+            if lines[end].get("section", "") != section and length >= min_chunk_size:
+                break
+            length += len(lines[end]["text"])
+            end += 1
+
+        block = lines[start:end]
+        head, tail = block[0], block[-1]
+        chunks.append(
+            {
+                "content": "\n".join(line["text"] for line in block),
+                "page": head["page"],
+                "page_end": tail["page"],
+                "line_start": head["line_no"],
+                "line_end": tail["line_no"],
+                "section": head.get("section", ""),
+            }
+        )
+
+        if end >= len(lines):
+            break
+
+        # overlap: 末尾から overlap 文字ぶんの行を次のチャンクにも重ねる
+        # (文の途中でぶつ切りになって意味が失われるのを防ぐ。目的は従来と同じ)
+        back = 0
+        acc = 0
+        while back < len(block) - 1 and acc + len(block[-1 - back]["text"]) <= overlap:
+            acc += len(block[-1 - back]["text"])
+            back += 1
+        # back は最大でも len(block)-1 なので、start は必ず1つ以上前進する(無限ループ防止)
+        start = end - back
+
     return chunks
 
 
@@ -110,13 +299,13 @@ def get_embedding(text: str) -> list[float]:
 
 
 # CosmosDBに保存する
-def save_to_cosmos(filename: str, chunks: list[str]):
+def save_to_cosmos(filename: str, chunks: list[dict]):
     # datetime.now(): 現在の日時を取得
-    # .isformat(): "2026-09-18T14:30:00.123456" のような国際標準形式の文字列に変換
+    # .isoformat(): "2026-09-18T14:30:00.123456" のような国際標準形式の文字列に変換
     uploaded_at = datetime.now().isoformat()
     # チャンクを1つずつ、CosmosDBに保存する
     for i, chunk in enumerate(chunks):
-        # upsert_item(): isert + updateの合体メソッド
+        # upsert_item(): insert + update の合体メソッド
         # 同じidがなければ新規、あれば上書き更新する
         # → 同じPDFがアップロードされても重複しない
         rag_container.upsert_item(
@@ -124,22 +313,31 @@ def save_to_cosmos(filename: str, chunks: list[str]):
                 "id": f"{filename}_{i}",  # 一意のID
                 "filename": filename,  # どのファイルのチャンクか
                 "chunk_index": i,  # 何番目のチャンクか
-                "content": chunk,  # チャンクのテキスト本文
+                "content": chunk["content"],  # チャンクのテキスト本文
+                "page": chunk["page"],  # 開始ページ
+                "page_end": chunk["page_end"],  # 終了ページ
+                "line_start": chunk["line_start"],  # 開始行
+                "line_end": chunk["line_end"],  # 終了行
+                "section": chunk["section"],  # 属する章
                 "uploaded_at": uploaded_at,  # アップロード時
             }
         )
 
 
 def process_pdf(file_path: str, filename: str):
-    """PDFをテキスト化 → チャンク分割 → Embeddig生成 → ChromaDBに保存"""
-    # Step2: テキストを抽出
-    text = extract_text_from_pdf(file_path)
+    """PDFを行抽出 → 章の付与 → チャンク分割 → Embedding生成 → ChromaDBに保存"""
+    # Step2: 行単位でテキストを抽出(ページ番号・行番号・フォントサイズ付き)
+    lines = extract_lines(file_path)
 
-    # Step3: チャンク分割
-    chunks = split_info_chunks(text)
+    # Step2-b: 本文サイズを推定し、各行に「直近の見出し」を付与する
+    body_size = detect_body_size(lines)
+    assign_sections(lines, body_size)
 
-    # Step4-5: Embeddinf生成→ChromaDB保存
-    # CosmosDBに渡す4つのリストを用意する
+    # Step3: チャンク分割(ページ/行/章を引き継ぐ)
+    chunks = split_into_chunks(lines)
+
+    # Step4-5: Embedding生成 → ChromaDB保存
+    # ChromaDBに渡す4つのリストを用意する
     ids = []
     embeddings = []
     documents = []
@@ -150,19 +348,30 @@ def process_pdf(file_path: str, filename: str):
         # 一意のIDを作る 例："AI市場レポート.pdf_0", "AI市場レポート.pdf_1", ...
         chunk_id = f"{filename}_{i}"
         # チャンクをベクトルに変換する
-        embedding = get_embedding(chunk)
+        embedding = get_embedding(chunk["content"])
         # それぞれのリストに追加する
         ids.append(chunk_id)
         embeddings.append(embedding)
-        documents.append(chunk)
-        metadatas.append({"filename": filename, "chunk_index": i})
+        documents.append(chunk["content"])
+        # metadata に入れられるのは str / int / float / bool のみ(入れ子やNoneは不可)
+        metadatas.append(
+            {
+                "filename": filename,
+                "chunk_index": i,
+                "page": chunk["page"],
+                "page_end": chunk["page_end"],
+                "line_start": chunk["line_start"],
+                "line_end": chunk["line_end"],
+                "section": chunk["section"],
+            }
+        )
 
-    # ChrmaDBに保存する
+    # ChromaDBに保存する
     collection.add(
-        ids=ids,  # 各チャンクの一意の識別し
+        ids=ids,  # 各チャンクの一意の識別子
         embeddings=embeddings,  # ベクトル検索に使う数値配列
         documents=documents,  # 元のテキスト(検索結果として返す用)
-        metadatas=metadatas,  # 付加情報(どのファイルの何番目か)
+        metadatas=metadatas,  # 付加情報(どのファイルの何ページ何行目か)
     )
     # CosmosDBにもチャンクを保存する
     save_to_cosmos(filename, chunks)
@@ -270,13 +479,22 @@ def search_documents(query: str, n_results: int = 3) -> list[dict]:
         # チャンクの先頭行から章タイトルを抽出
         first_line = content.strip().split("\n")[0]
 
+        meta = results["metadatas"][0][i]
+
         search_result.append(
             {
                 "content": content,
-                "filename": results["metadatas"][0][i]["filename"],
-                "chunk_index": results["metadatas"][0][i]["chunk_index"],
-                "distance": results["distances"][0][i],  # ベクトル距離(築地どの元データ)
-                "section": first_line[:50],  # チャンク先頭50文字を章の手がかりとして返す
+                "filename": meta["filename"],
+                "chunk_index": meta["chunk_index"],
+                "distance": results["distances"][0][i],  # ベクトル距離(類似度の元データ)
+                # 以下は再インデックス後のチャンクにしか入っていないため .get() で安全に取る
+                # (古いチャンクが残っている場合は None / 空文字になる)
+                "page": meta.get("page"),
+                "page_end": meta.get("page_end"),
+                "line_start": meta.get("line_start"),
+                "line_end": meta.get("line_end"),
+                # section が空なら、従来どおりチャンク先頭行を手がかりとして出す
+                "section": meta.get("section") or first_line,
             }
         )
     return search_result
