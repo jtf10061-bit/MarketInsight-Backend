@@ -209,55 +209,6 @@ def list_uploads():
     return pdf_files
 
 
-@app.post("/rag/search")
-def rag_search(req: RagQueryRequests):
-    # 1. ChromaDBからベクトル検索
-    results = search_documents(req.query)
-
-    # 2. 検索結果をコンテキスト(AIに回答を生成させるときに与える「背景情報」や「参考資料となるテキスト」)としてまとめる
-    context = "\n\n".join([f"【{r['filename']}】\n{r['content']}" for r in results])
-
-    # 3. AIに質問 + コンテキストとしてまとめる
-    prompt = f"""以下のドキュメントを参考に、質問に回答してください
-
-## 参考ドキュメント
-{context}
-
-## 質問
-{req.query}
-"""
-    # 回答を蓄積するリスト
-    full_answer = []
-
-    # 4. 既存のrun関数を使って回答をストリーミング生成するジェネレータ関数
-    # ストリーミング生成：AIが回答を出力する際、全体の生成が完了するのを待つのではなく、生成されたテキストやデータから順次（リアルタイムに）クライアントへ送り返す仕組み
-    def generate():
-        for step in run(prompt, [{"role": "user", "content": prompt}], model=req.model):
-            # run(): 既存のReActループ関数。promptとhistoryを渡してAIに回答させる
-            # []: 履歴なし(RAGではコンテキスト(AIが質問に答えるために必要な背景情報のこと)をpromptに含めているため不要)
-            # model: 使用するAIモデル
-            if step.get("type") == "answer":
-                full_answer.append(step["content"])
-            yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
-            # json.dumps(): Python辞書をJSON文字列に変換
-            # ensure_ascii=False: 日本語をそのまま出力(\uxxxにしない) → データ量の削減、ログやデバッグの視認性向上、SSEでの受け渡し(日本語の文字化けの心配なく安全に受け取れる)
-            # f"data: ...\n\n": SSE(Server-Sent Events)形式。ブラウザが1行ずつ受信できる
-            # yield: 値を1つ返して処理を一時停止、次のforループで再開する(ジェネレータ)
-
-        # ストリーミング完了後に履歴保存
-        if req.user_id and full_answer:
-            # full_answer: リストに回答チャンクを蓄積
-            from marketinsight_backend.rag import save_rag_history
-
-            # ストリーミング完了後に、save_rag_historyを呼ぶ
-            save_rag_history(req.user_id, req.query, "".join(full_answer))
-
-    # StreamingResponse(): FastAPIのレスポンスクラス。一括ではなく逐次的にデータを返す
-    # generate(): 上で定義したジェネレータ(クロージャ)を渡す。外側のfull_answerにアクセスできる
-    # media_type: "text/event-stream": SSE形式であることをブラウザに伝えるContent-Type
-    return StreamingResponse(generate(), media_type="text/event-stream")
-
-
 @app.get("/rag/files")
 def rag_files():
     from marketinsight_backend.rag import get_cosmos_files
@@ -291,12 +242,13 @@ def api_delete_rag_history(user_id: str, history_id: str):
 def rag_search(req: RagQueryRequests):
     # req: RagQueryRequests: リクエストボディのJSONをPydanticモデルで自動検証・型定義して受け取る
 
+    # 1. ChromaDBからベクトル検索
     # search_documents(): ユーザーの質問文字列(req.query)を元にベクトル検索を実行し、関連チャンクを取得
     results = search_documents(req.query)
 
-    # エビデンス情報をSSEで先に送る
+    # 2. エビデンス情報をSSEで先に送る
     # SSE: サーバーからWebブラウザ（クライアント）へ、リアルタイムにデータを連続送信（ストリーミング）するためのWEB標準技術
-    # リストない方表記: 検索結果(results)からUI表示に必要なメタデータだけを抽出し、整形
+    # リスト内包表記: 検索結果(results)からUI表示に必要なメタデータだけを抽出し、整形
     evidence = [
         {
             "filename": r["filename"],
@@ -307,8 +259,16 @@ def rag_search(req: RagQueryRequests):
         for r in results
     ]
 
-    context = "\n\n".join([f"【{r['filename']}】 \n{r['content']}" for r in results])
-    prompt = """以下のドキュメントを参考に、質問に回答してください。
+    # 3. 信頼度算出
+    from marketinsight_backend.rag import calculate_confidence
+
+    confidence = calculate_confidence(results)
+
+    # 4. 検索結果をコンテキスト(AIに回答を生成させるときに与える「背景情報」や「参考資料となるテキスト」)としてまとめる
+    context = "\n\n".join([f"【{r['filename']}】\n{r['content']}" for r in results])
+
+    # 5. AIに質問 + コンテキストとしてまとめる
+    prompt = f"""以下のドキュメントを参考に、質問に回答してください
 
 ## 参考ドキュメント
 {context}
@@ -316,20 +276,36 @@ def rag_search(req: RagQueryRequests):
 ## 質問
 {req.query}
 """
-
+    # 回答を蓄積するリスト
     full_answer = []
 
+    # 6. 既存のrun関数を使って回答をストリーミング生成するジェネレータ関数
+    # ストリーミング生成：AIが回答を出力する際、全体の生成が完了するのを待つのではなく、生成されたテキストやデータから順次（リアルタイムに）クライアントへ送り返す仕組み
     def generate():
-        # 最初にエビデンス情報を送る
-        yield f"data: {json.dumps({'type': 'evidence', 'content': evidence}, ensure_ascii=False)} \n\n"
+        # 最初にエビデンス情報 + 信頼度を送る
+        yield f"data: {json.dumps({'type': 'evidence', 'content': evidence, 'confidence': confidence}, ensure_ascii=False)}\n\n"
+
         for step in run(prompt, [{"role": "user", "content": prompt}], model=req.model):
+            # run(): 既存のReActループ関数。promptとhistoryを渡してAIに回答させる
+            # [{"role": "user", "content": prompt}]: 履歴としてpromptを渡す(RAGではコンテキストをpromptに含めている)
+            # model: 使用するAIモデル
             if step.get("type") == "answer":
                 full_answer.append(step["content"])
             yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+            # json.dumps(): Python辞書をJSON文字列に変換
+            # ensure_ascii=False: 日本語をそのまま出力(\uxxxにしない) → データ量の削減、ログやデバッグの視認性向上、SSEでの受け渡し(日本語の文字化けの心配なく安全に受け取れる)
+            # f"data: ...\n\n": SSE(Server-Sent Events)形式。ブラウザが1行ずつ受信できる
+            # yield: 値を1つ返して処理を一時停止、次のforループで再開する(ジェネレータ)
 
+        # ストリーミング完了後に履歴保存
         if req.user_id and full_answer:
+            # full_answer: リストに回答チャンクを蓄積
             from marketinsight_backend.rag import save_rag_history
 
+            # ストリーミング完了後に、save_rag_historyを呼ぶ
             save_rag_history(req.user_id, req.query, "".join(full_answer))
 
+    # StreamingResponse(): FastAPIのレスポンスクラス。一括ではなく逐次的にデータを返す
+    # generate(): 上で定義したジェネレータ(クロージャ)を渡す。外側のfull_answerにアクセスできる
+    # media_type: "text/event-stream": SSE形式であることをブラウザに伝えるContent-Type
     return StreamingResponse(generate(), media_type="text/event-stream")
