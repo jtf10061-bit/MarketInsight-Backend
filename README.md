@@ -167,6 +167,164 @@ app.add_middleware(
 ブラウザは異なるオリジン間の通信をデフォルトでブロックするため、この設定が必要です。
 フロントを 5173 以外のポートで動かす場合はここも変更します。
 
+## ChromaDB の中身を見る
+
+ドキュメント RAG のベクトルストアは ChromaDB で、実体はこのリポジトリ配下にあります。
+
+```
+MarketInsight-Backend/
+└── chroma_db/
+    ├── chroma.sqlite3          # テキスト・メタデータ・ID（ただの SQLite）
+    └── <uuid>/
+        └── data_level0.bin     # ベクトル本体（HNSW インデックス）
+```
+
+**ベクトルは SQLite に入っていません。** `chroma.sqlite3` を開いても 1536 次元の数値配列は
+出てきません。ベクトルを見たいときだけ Python を使います（後述）。
+
+なお、検索で実際に参照されるのはこの ChromaDB だけです。
+Cosmos DB の `rag-documents` にも同じテキストが入っていますが、
+ファイル一覧の取得と削除にしか使われておらず、検索経路には登場しません。
+
+### 方法 1: sqlite3 コマンド（インストール不要）
+
+macOS には最初から入っています。
+
+```bash
+cd MarketInsight-Backend
+
+# メタデータにどんなキーが入っているか
+sqlite3 chroma_db/chroma.sqlite3 "select distinct key from embedding_metadata;"
+
+# ファイル別のチャンク数
+sqlite3 -header -column chroma_db/chroma.sqlite3 \
+  "select string_value as file, count(*) as chunks from embedding_metadata
+   where key='filename' group by string_value;"
+
+# 本文を先頭 60 文字だけ一覧
+sqlite3 chroma_db/chroma.sqlite3 \
+  "select substr(string_value,1,60) from embedding_metadata
+   where key='chroma:document' limit 5;"
+```
+
+### 方法 2: DB Browser for SQLite（GUI）
+
+```bash
+brew install --cask db-browser-for-sqlite
+```
+
+Homebrew はシステム全体にインストールするため、実行するディレクトリは関係ありません。
+
+ファイル選択ダイアログで迷う場合は、ターミナルから直接開けます。
+
+```bash
+open -a "DB Browser for SQLite" \
+  /Users/estyle-180/Documents/study/MarketInsightAI/MarketInsight-Backend/chroma_db/chroma.sqlite3
+```
+
+開いた直後は「Database Structure」タブでテーブル名しか見えません。
+中身を見るには **「Browse Data」タブ** に切り替え、左上の **Table:** プルダウンから
+テーブルを選びます。
+
+### テーブル構造
+
+Chroma は 20 個近くテーブルを作りますが、中身に関係するのは 2 つだけです。
+残り（`segments` / `migrations` / `max_seq_id` / `embeddings_queue` など）は内部管理用です。
+
+| テーブル | 中身 |
+| --- | --- |
+| `embeddings` | チャンクの ID 一覧。`embedding_id` が `AI市場調査レポート2026.pdf_0` のような文字列 |
+| `embedding_metadata` | 本文とメタデータの実体 |
+
+`embedding_metadata` は **1 チャンク 1 行ではありません。** 「縦持ち（EAV）」形式で、
+1 チャンクが複数行に分かれています。
+
+```
+id | key             | string_value               | int_value
+---+-----------------+----------------------------+----------
+ 1 | filename        | AI市場調査レポート2026.pdf |
+ 1 | chunk_index     |                            |    0
+ 1 | chroma:document | AI市場調査レポート2026...  |            ← 本文
+---+-----------------+----------------------------+----------
+ 2 | filename        | AI市場調査レポート2026.pdf |
+ 2 | chunk_index     |                            |    1
+```
+
+`id` が同じ行がまとまって 1 チャンクです。値の型ごとに列が分かれている
+（`string_value` / `int_value` / `float_value` / `bool_value`）ため、
+使われていない列は空欄になります。Browse Data で眺めると空欄だらけに見えるのはこのためです。
+
+**`key` が `chroma:document` の行の `string_value` が本文です。**
+
+### 横持ちに直して見る
+
+DB Browser の「Execute SQL」タブ、または `sqlite3` にそのまま貼れます。
+1 チャンク 1 行で表示されます。
+
+```sql
+select
+  e.embedding_id as chunk_id,
+  max(case when m.key='filename'        then m.string_value end) as filename,
+  max(case when m.key='chunk_index'     then m.int_value    end) as idx,
+  max(case when m.key='chroma:document' then m.string_value end) as text
+from embeddings e
+join embedding_metadata m on m.id = e.id
+group by e.id
+order by filename, idx;
+```
+
+DB Browser ではセルをクリックすると、右側の「Edit Database Cell」パネルに全文が出ます。
+本文は長いので一覧では途中までしか見えません。
+
+### 方法 3: Python（ベクトルを見るならこれ）
+
+```bash
+cd MarketInsight-Backend
+PYTHONPATH=src python3
+```
+
+```python
+import marketinsight_backend.rag as rag
+c = rag.collection
+
+c.count()                  # 件数
+c.peek(3)                  # 先頭3件（テキスト・メタデータ・ベクトル）
+
+# 絞り込み
+c.get(where={"filename": "AI市場調査レポート2026.pdf"}, limit=2)
+c.get(where_document={"$contains": "市場規模"}, limit=3)   # 全文検索
+
+# 距離指標の確認（'l2' か 'cosine' か）
+c._model.configuration_json["hnsw"]["space"]
+```
+
+`peek()` の戻り値は `ids` / `documents` / `metadatas` / `embeddings` の 4 リストで、
+添字が対応しています。`embeddings[0]` が 1536 次元の float リストです。
+
+### インデックスが最新かどうかの判別
+
+メタデータのキーで判別できます。
+
+```bash
+sqlite3 chroma_db/chroma.sqlite3 "select distinct key from embedding_metadata;"
+```
+
+| 出力 | 状態 |
+| --- | --- |
+| `filename` / `chunk_index` / `chroma:document` のみ | 旧インデックス |
+| `page` / `line_start` / `line_end` / `section` もある | ページ・行・章の対応後（`reindex.py` 実行済み） |
+
+メタデータはインデックス作成時に確定するため、抽出処理を変更しても
+既存チャンクには反映されません。反映するには `reindex.py` で入れ直します。
+
+```bash
+cd MarketInsight-Backend
+PYTHONPATH=src python3 reindex.py
+```
+
+このスクリプトはコレクションを削除して作り直し、`uploads/` 配下の PDF を
+すべて再インデックスします（チャンク 1 件につき Embedding API を 1 回呼びます）。
+
 ## トラブルシューティング
 
 | 症状 | 原因と対処 |
