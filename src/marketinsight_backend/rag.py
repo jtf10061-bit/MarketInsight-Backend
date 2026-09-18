@@ -260,7 +260,7 @@ def delete_rag_history(user_id: str, history_id: str):
 def search_documents(query: str, n_results: int = 3) -> list[dict]:
     """エビデンス表示"""
     query_embedding = get_embedding(query)
-    results = collection.query(query_embedding=[query_embedding], n_results=n_results)
+    results = collection.query(query_embeddings=[query_embedding], n_results=n_results)
 
     search_result = []
     for i in range(len(results["documents"][0])):
@@ -278,3 +278,46 @@ def search_documents(query: str, n_results: int = 3) -> list[dict]:
             }
         )
     return search_result
+
+
+"""
+信頼度の計算ロジック（3要素の加重平均）
+要素	重み	意味	算出方法
+ベクトル類似度	50%	質問と参照チャンクがどれだけ近いか	ChromaDBの距離を変換
+ヒットチャンク数	25%	複数チャンクが関連しているか	n_results中の有効ヒット数
+コンテキスト長	25%	参照テキストの情報量が十分か	合計文字数に基づくスコア
+"""
+
+
+def calculate_confidence(results: list[dict]) -> dict:
+    """検索結果から信頼度を算出する"""
+    if not results:
+        return {"score": 0, "details": {"similarity": 0, "coverage": 0, "context_richness": 0}}
+
+    # 1. ベクトル類似度スコア(0-100)
+    #       distanceが0に近いほど類似度が高い
+    #       distance < 0.5 → 高類似度、> 1.5 → 底類似度
+    avg_distance = sum(r["distance"] for r in results) / len(results)
+    similarity_score = max(0, min(100, (1 - avg_distance / 2) * 100))
+
+    # 2. ヒットカバレッジスコア(0-100)
+    #       3件中、類似度が高い(distance < 1.0) チャンクが何件あるか
+    relevant_count = sum(1 for r in results if r["distance"] < 1.0)
+    coverage_score = (relevant_count / len(results)) * 100
+
+    # 3. コンテキスト情報量スコア(0-100)
+    #       参照テキストの合計文字数。500文字以上で満点
+    total_chars = sum(len(r["content"]) for r in results)
+    context_score = min(100, (total_chars / 500) * 100)
+
+    # 加重平均
+    confidencee = similarity_score * 0.50 + coverage_score * 0.25 + context_score * 0.25
+
+    return {
+        "score": round(confidencee, 1),
+        "details": {
+            "similarity": round(similarity_score, 1),
+            "coverage": round(coverage_score, 1),
+            "context_richness": round(context_score, 1),
+        },
+    }
