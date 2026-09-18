@@ -233,7 +233,7 @@ def api_get_rag_history(user_id: str):
     return get_rag_history(user_id)
 
 
-@app.delete("/rag/history/{user_id}/{history_id}")
+@app.delete("/rag/history/{user_id}/{history_id:path}")
 def api_delete_rag_history(user_id: str, history_id: str):
     from marketinsight_backend.rag import delete_rag_history
 
