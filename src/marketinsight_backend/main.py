@@ -97,7 +97,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 """
-@app.〇〇(): デコレータ。「このURLにこのHTTPメソッドでリクエストが来たら、この関数を実行する」というルーティング定義
+@app.〇〇(): FastAPIのルーティングデコレータ。「このURLにこのHTTPメソッドでリクエストが来たら、この関数を実行する」というルーティング定義
 例：
 @app.get("/chats/{user_id}")    # GET /chats/test-user にアクセスしたら
 def api_get_chats(user_id: str): # この関数を実行する
@@ -285,3 +285,51 @@ def api_get_rag_history(user_id: str):
 @app.delete("/rag/history/{user_id}/{history_id}")
 def api_delete_rag_history(user_id: str, history_id: str):
     return {"status": "deleted"}
+
+
+@app.post("/rag/search")
+def rag_search(req: RagQueryRequests):
+    # req: RagQueryRequests: リクエストボディのJSONをPydanticモデルで自動検証・型定義して受け取る
+
+    # search_documents(): ユーザーの質問文字列(req.query)を元にベクトル検索を実行し、関連チャンクを取得
+    results = search_documents(req.query)
+
+    # エビデンス情報をSSEで先に送る
+    # SSE: サーバーからWebブラウザ（クライアント）へ、リアルタイムにデータを連続送信（ストリーミング）するためのWEB標準技術
+    # リストない方表記: 検索結果(results)からUI表示に必要なメタデータだけを抽出し、整形
+    evidence = [
+        {
+            "filename": r["filename"],
+            "section": r["section"],
+            "chunk_index": r["chunk_index"],
+            "similarity": round((1 - r["distance"]) * 100, 1),  # 距離 → 類似度%に変換
+        }
+        for r in results
+    ]
+
+    context = "\n\n".join([f"【{r['filename']}】 \n{r['content']}" for r in results])
+    prompt = """以下のドキュメントを参考に、質問に回答してください。
+
+## 参考ドキュメント
+{context}
+
+## 質問
+{req.query}
+"""
+
+    full_answer = []
+
+    def generate():
+        # 最初にエビデンス情報を送る
+        yield f"data: {json.dumps({'type': 'evidence', 'content': evidence}, ensure_ascii=False)} \n\n"
+        for step in run(prompt, [{"role": "user", "content": prompt}], model=req.model):
+            if step.get("type") == "answer":
+                full_answer.append(step["content"])
+            yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+
+        if req.user_id and full_answer:
+            from marketinsight_backend.rag import save_rag_history
+
+            save_rag_history(req.user_id, req.query, "".join(full_answer))
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
