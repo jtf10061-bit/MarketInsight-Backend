@@ -87,6 +87,7 @@ class AddMessageRequest(BaseModel):
 class RagQueryRequests(BaseModel):
     query: str
     model: str = "aoai-gpt-4.1-mini"
+    user_id: str = ""
 
 
 # UPLOAD_DIR: アップロード先のフォルダ(MarketInsight-Backend/uploads/)
@@ -225,6 +226,8 @@ def rag_search(req: RagQueryRequests):
 ## 質問
 {req.query}
 """
+    # 回答を蓄積するリスト
+    full_answer = []
 
     # 4. 既存のrun関数を使って回答をストリーミング生成するジェネレータ関数
     # ストリーミング生成：AIが回答を出力する際、全体の生成が完了するのを待つのではなく、生成されたテキストやデータから順次（リアルタイムに）クライアントへ送り返す仕組み
@@ -233,14 +236,24 @@ def rag_search(req: RagQueryRequests):
             # run(): 既存のReActループ関数。promptとhistoryを渡してAIに回答させる
             # []: 履歴なし(RAGではコンテキスト(AIが質問に答えるために必要な背景情報のこと)をpromptに含めているため不要)
             # model: 使用するAIモデル
+            if step.get("type") == "answer":
+                full_answer.append(step["content"])
             yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
             # json.dumps(): Python辞書をJSON文字列に変換
             # ensure_ascii=False: 日本語をそのまま出力(\uxxxにしない) → データ量の削減、ログやデバッグの視認性向上、SSEでの受け渡し(日本語の文字化けの心配なく安全に受け取れる)
             # f"data: ...\n\n": SSE(Server-Sent Events)形式。ブラウザが1行ずつ受信できる
             # yield: 値を1つ返して処理を一時停止、次のforループで再開する(ジェネレータ)
 
+        # ストリーミング完了後に履歴保存
+        if req.user_id and full_answer:
+            # full_answer: リストに回答チャンクを蓄積
+            from marketinsight_backend.rag import save_rag_history
+
+            # ストリーミング完了後に、save_rag_historyを呼ぶ
+            save_rag_history(req.user_id, req.query, "".join(full_answer))
+
     # StreamingResponse(): FastAPIのレスポンスクラス。一括ではなく逐次的にデータを返す
-    # generate(): 上で定義したジェネレータを渡す
+    # generate(): 上で定義したジェネレータ(クロージャ)を渡す。外側のfull_answerにアクセスできる
     # media_type: "text/event-stream": SSE形式であることをブラウザに伝えるContent-Type
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -259,4 +272,16 @@ def delete_rag_file(filename: str):
     from marketinsight_backend.rag import delete_document
 
     delete_document(filename)
+    return {"status": "deleted"}
+
+
+@app.get("/rag/history/{user_id}")
+def api_get_rag_history(user_id: str):
+    from marketinsight_backend.rag import get_rag_history
+
+    return get_rag_history(user_id)
+
+
+@app.delete("/rag/history/{user_id}/{history_id}")
+def api_delete_rag_history(user_id: str, history_id: str):
     return {"status": "deleted"}
