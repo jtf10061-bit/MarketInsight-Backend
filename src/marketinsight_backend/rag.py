@@ -255,3 +255,26 @@ def get_rag_history(user_id: str) -> list[dict]:
 def delete_rag_history(user_id: str, history_id: str):
     """ドキュメントRAG検索履歴を1件、削除"""
     rag_history_container.delete_item(history_id, partition_key=user_id)
+
+
+def search_documents(query: str, n_results: int = 3) -> list[dict]:
+    """エビデンス表示"""
+    query_embedding = get_embedding(query)
+    results = collection.query(query_embedding=[query_embedding], n_results=n_results)
+
+    search_result = []
+    for i in range(len(results["documents"][0])):
+        content = results["documents"][0][i]
+        # チャンクの先頭行から章タイトルを抽出
+        first_line = content.strip().split("\n")[0]
+
+        search_result.append(
+            {
+                "content": content,
+                "filename": results["metadatas"][0][i]["filename"],
+                "chunk_index": results["metadatas"][0][i]["chunk_index"],
+                "distance": results["distances"][0][i],  # ベクトル距離(築地どの元データ)
+                "section": first_line[:50],  # チャンク先頭50文字を章の手がかりとして返す
+            }
+        )
+    return search_result
