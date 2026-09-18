@@ -257,6 +257,11 @@ def rag_search(req: RagQueryRequests):
             "filename": r["filename"],
             "section": r["section"],
             "chunk_index": r["chunk_index"],
+            "content": r["content"],
+            "page": r.get("page"),
+            "page_end": r.get("page_end"),
+            "line_start": r.get("line_start"),
+            "line_end": r.get("line_end"),
             "similarity": round((1 - r["distance"]) * 100, 1),  # 距離 → 類似度%に変換
         }
         for r in results
