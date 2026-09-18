@@ -405,7 +405,9 @@ def delete_document(filename: str):
 
 
 # ドキュメント検索RAG関連
-def save_rag_history(user_id: str, query: str, answer: str, evidence: list, confidence: dict):
+def save_rag_history(
+    user_id: str, query: str, answer: str, evidence: list, confidence: dict, mode: str = "search"
+):
     """ドキュメント検索RAGの検索履歴を保存"""
     rag_history_container.upsert_item(
         {
@@ -415,6 +417,7 @@ def save_rag_history(user_id: str, query: str, answer: str, evidence: list, conf
             "answer": answer,
             "evidence": evidence,
             "confidence": confidence,
+            "mode": mode,
             "created_at": datetime.now().isoformat(),
         }
     )
@@ -422,7 +425,7 @@ def save_rag_history(user_id: str, query: str, answer: str, evidence: list, conf
 
 def get_rag_history(user_id: str) -> list[dict]:
     """ドキュメントRAG検索履歴を取得(新しい順)"""
-    query = "SELECT c.id, c.query, c.answer, c.evidence, c.confidence, c.created_at FROM c WHERE c.user_id = @uid ORDER BY c.created_at DESC"
+    query = "SELECT c.id, c.query, c.answer, c.evidence, c.confidence, c.mode, c.created_at FROM c WHERE c.user_id = @uid ORDER BY c.created_at DESC"
     parameters = [{"name": "@uid", "value": user_id}]
     items = list(
         rag_history_container.query_items(
@@ -437,7 +440,7 @@ def delete_rag_history(user_id: str, history_id: str):
     rag_history_container.delete_item(history_id, partition_key=user_id)
 
 
-def search_documents(query: str, n_results: int = 3) -> list[dict]:
+def search_documents(query: str, n_results: int = 3, max_distance: float = 1.2) -> list[dict]:
     # query: ユーザーの質問文
     # n_results=3: 返す件数(デフォルト3件)
     """質問に近いチャンクをベクトル検索で取得し、エビデンス情報付きで返す"""
@@ -479,7 +482,7 @@ def search_documents(query: str, n_results: int = 3) -> list[dict]:
             }
         )
     # 類似度が低すぎるチャンクを除外する(distance >= 1.2 は無関係とみなす)
-    search_result = [r for r in search_result if r["distance"] < 1.2]
+    search_result = [r for r in search_result if r["distance"] < max_distance]
 
     return search_result
 
