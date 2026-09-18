@@ -13,3 +13,11 @@ dependencies = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marketinsight_backend"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# ruff のデフォルト(E4,E7,E9,F) のまま。慣れてきたら "I"(import整列) や "UP" を足す
+select = ["E4", "E7", "E9", "F"]
