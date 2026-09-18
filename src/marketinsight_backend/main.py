@@ -1,10 +1,15 @@
-from fastapi import FastAPI     # アプリ本体。app = FastAPI() でサーバーを作る。
-from fastapi.middleware.cors import CORSMiddleware      # CORS（Cross-Origin Resource Sharing）を許可するミドルウェア(ブラウザはセキュリティのため、異なるオリジン間の通信をデフォルトでブロックする)
+from fastapi import FastAPI, UploadFile, File  # アプリ本体。app = FastAPI() でサーバーを作る。
+import os
+from fastapi.middleware.cors import (
+    CORSMiddleware,
+)  # CORS（Cross-Origin Resource Sharing）を許可するミドルウェア(ブラウザはセキュリティのため、異なるオリジン間の通信をデフォルトでブロックする)
+
 # CORS設定：別ドメイン（フロント側など）からのAPI呼び出しを許可する
 # （これがないとブラウザのセキュリティ機能で通信がブロックされてしまうため）
-from fastapi.responses import StreamingResponse     # レスポンスを一括ではなくストリーミングで返す
-
+from fastapi.responses import StreamingResponse  # レスポンスを一括ではなくストリーミングで返す
 from pydantic import BaseModel
+from marketinsight_backend.rag import process_pdf
+
 """
 リクエストのバリデーション（型チェック）用。ChatRequest で message: str と定義すると、FastAPIが自動的に:
     JSONの中に message があるか確認
@@ -13,18 +18,17 @@ from pydantic import BaseModel
 """
 import json
 import time
-from marketinsight_agent.react_loop import run # MCP-Agentのrunをimport
-from marketinsight_history.chat_service import(
+from marketinsight_agent.react_loop import run  # MCP-Agentのrunをimport
+from marketinsight_history.chat_service import (
     get_chats,
     create_chat,
     delete_chat,
     toggle_favorite,
     update_title,
     add_message,
-    get_messages,
 )
 from marketinsight_agent.config import MODELS
-
+from marketinsight_backend.rag import search_documents
 
 """
 FastAPIは
@@ -42,9 +46,13 @@ app = FastAPI()
 # ミドルウェアの作成
 app.add_middleware(
     CORSMiddleware,
-    allow_origins = ["http://localhost:5173"],      # どこからのアクセスを許可するか
-    allow_methods=["*"],    # 許可するHTTPメソッドの指定です。"*" は全メソッド許可。    → /chat はPOSTで Content-Type: application/json ヘッダーを使っているので、これがないとブロックされ、エラー(エラー: サーバーに接続できません)が出ていた
-    allow_headers=["*"],    # 許可するHTTPヘッダーの指定です。"*" は全ヘッダー許可。    → /chat はPOSTで Content-Type: application/json ヘッダーを使っているので、これがないとブロックされ、エラー(エラー: サーバーに接続できません)が出ていた
+    allow_origins=["http://localhost:5173"],  # どこからのアクセスを許可するか
+    allow_methods=[
+        "*"
+    ],  # 許可するHTTPメソッドの指定です。"*" は全メソッド許可。    → /chat はPOSTで Content-Type: application/json ヘッダーを使っているので、これがないとブロックされ、エラー(エラー: サーバーに接続できません)が出ていた
+    allow_headers=[
+        "*"
+    ],  # 許可するHTTPヘッダーの指定です。"*" は全ヘッダー許可。    → /chat はPOSTで Content-Type: application/json ヘッダーを使っているので、これがないとブロックされ、エラー(エラー: サーバーに接続できません)が出ていた
 )
 # .add_middleware(): FastAPIなどのWebフレームワークにおいて、アプリケーション全体のリクエストやレスポンスに横断的な処理（ログ記録、セキュリティ対策、データ圧縮など）を挿入（追加）するためのメソッド
 # → 第1引数にミドルウェアのクラスを取り、第2引数以降にはミドルウェアに渡したいキーワード引数を取る
@@ -52,11 +60,13 @@ app.add_middleware(
 
 # history = []
 
+
 class ChatRequest(BaseModel):
     message: str
     chat_id: str = ""
     model: str = "aoai-gpt-4.1-mini"
     user_id: str = ""
+
 
 class CreateChatRequest(BaseModel):
     id: str
@@ -64,12 +74,25 @@ class CreateChatRequest(BaseModel):
     date: str
     user_id: str
 
+
 class UpdateTitleRequest(BaseModel):
     title: str
+
 
 class AddMessageRequest(BaseModel):
     role: str
     content: str
+
+
+class RagQueryRequests(BaseModel):
+    query: str
+    model: str = "aoai-gpt-4.1-mini"
+
+
+# UPLOAD_DIR: アップロード先のフォルダ(MarketInsight-Backend/uploads/)
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
+# os.makedirs(..., exist_ok=True): フォルダがなければ作る、あればそのまま
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 """
@@ -87,39 +110,47 @@ HTTPメソッドごとの使い分け：
 @app.delete() DELETE	     データの削除
 """
 
+
 @app.get("/health")
 # health(): サーバーが正常に動いているか確認するためのヘルスチェックエンドポイント
 def health():
     return {"status": "ok"}
 
+
 @app.get("/chats/{user_id}")
 def api_get_chats(user_id: str):
     return get_chats(user_id)
+
 
 @app.post("/chats")
 def api_create_chat(req: CreateChatRequest):
     create_chat(req.user_id, req.id, req.title, req.date)
     return {"status": "ok"}
 
+
 @app.delete("/chats/{user_id}/{chat_id}")
 def api_delete_chat(user_id: str, chat_id: str):
     delete_chat(user_id, chat_id)
     return {"status": "ok"}
+
 
 @app.patch("/chats/{user_id}/{chat_id}/favorite")
 def api_toggle_favorite(user_id: str, chat_id: str):
     toggle_favorite(user_id, chat_id)
     return {"status": "ok"}
 
+
 @app.patch("/chats/{user_id}/{chat_id}/title")
 def api_toggle_title(user_id: str, chat_id: str, req: UpdateTitleRequest):
     update_title(user_id, chat_id, req.title)
     return {"status": "ok"}
 
+
 @app.post("/chats/{user_id}/{chat_id}/messages")
 def api_add_message(user_id: str, chat_id: str, req: AddMessageRequest):
     add_message(user_id, chat_id, req.role, req.content)
     return {"status": "ok"}
+
 
 @app.post("/chat")
 def chat(request: ChatRequest):
@@ -128,12 +159,12 @@ def chat(request: ChatRequest):
     if request.chat_id:
         try:
             from marketinsight_history.chat_service import get_messages
+
             history = get_messages(request.user_id, request.chat_id)
         except Exception:
             pass
     if not history or history[-1].get("content") != request.message:
         history.append({"role": "user", "content": request.message})
-
 
     def generate():
         try:
@@ -142,8 +173,90 @@ def chat(request: ChatRequest):
                 time.sleep(1)
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'content': f'エラーが発生しました: {str(e)}'}, ensure_ascii=False)}\n\n"
+
     return StreamingResponse(generate(), media_type="text/event-stream")
+
 
 @app.get("/models")
 def get_models():
     return MODELS
+
+
+@app.post("/upload")
+# UploadFile: FastAPIでファイルアップロードを受け取る型
+# File(...): このパラメータは必須ファイルという指定
+async def upload_pdf(file: UploadFile = File(...)):
+    if not file.filename.endswith(".pdf"):
+        return {"error": "PDFファイルのみアップロード可能です"}
+
+    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    with open(file_path, "wb") as f:
+        # await file.read(): アップロードされたファイルの中身を読み取る
+        content = await file.read()
+        f.write(content)
+
+    process_pdf(file_path, file.filename)
+
+    return {"filename": file.filename, "status": "uploaded"}
+
+
+# /uploads: アップロード済みのファイル一覧を返すAPI
+@app.get("/uploads")
+def list_uploads():
+    files = os.listdir(UPLOAD_DIR)
+    pdf_files = [f for f in files if f.endswith(".pdf")]
+    return pdf_files
+
+
+@app.post("/rag/search")
+def rag_search(req: RagQueryRequests):
+    # 1. ChromaDBからベクトル検索
+    results = search_documents(req.query)
+
+    # 2. 検索結果をコンテキスト(AIに回答を生成させるときに与える「背景情報」や「参考資料となるテキスト」)としてまとめる
+    context = "\n\n".join([f"【{r['filename']}】\n{r['content']}" for r in results])
+
+    # 3. AIに質問 + コンテキストとしてまとめる
+    prompt = f"""以下のドキュメントを参考に、質問に回答してください
+
+## 参考ドキュメント
+{context}
+
+## 質問
+{req.query}
+"""
+
+    # 4. 既存のrun関数を使って回答をストリーミング生成するジェネレータ関数
+    # ストリーミング生成：AIが回答を出力する際、全体の生成が完了するのを待つのではなく、生成されたテキストやデータから順次（リアルタイムに）クライアントへ送り返す仕組み
+    def generate():
+        for step in run(prompt, [{"role": "user", "content": prompt}], model=req.model):
+            # run(): 既存のReActループ関数。promptとhistoryを渡してAIに回答させる
+            # []: 履歴なし(RAGではコンテキスト(AIが質問に答えるために必要な背景情報のこと)をpromptに含めているため不要)
+            # model: 使用するAIモデル
+            yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+            # json.dumps(): Python辞書をJSON文字列に変換
+            # ensure_ascii=False: 日本語をそのまま出力(\uxxxにしない) → データ量の削減、ログやデバッグの視認性向上、SSEでの受け渡し(日本語の文字化けの心配なく安全に受け取れる)
+            # f"data: ...\n\n": SSE(Server-Sent Events)形式。ブラウザが1行ずつ受信できる
+            # yield: 値を1つ返して処理を一時停止、次のforループで再開する(ジェネレータ)
+
+    # StreamingResponse(): FastAPIのレスポンスクラス。一括ではなく逐次的にデータを返す
+    # generate(): 上で定義したジェネレータを渡す
+    # media_type: "text/event-stream": SSE形式であることをブラウザに伝えるContent-Type
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.get("/rag/files")
+def rag_files():
+    from marketinsight_backend.rag import get_cosmos_files
+
+    return get_cosmos_files()
+
+
+# HTTPのDELETEメソッドを受け取るエンドポイント
+# {filename}: URLパスからファイル名を受け取る(パスパラメータ)
+@app.delete("/rag/files/{filename}")
+def delete_rag_file(filename: str):
+    from marketinsight_backend.rag import delete_document
+
+    delete_document(filename)
+    return {"status": "deleted"}
