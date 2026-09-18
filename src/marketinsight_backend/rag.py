@@ -227,7 +227,7 @@ def delete_document(filename: str):
 
 
 # ドキュメント検索RAG関連
-def save_rag_history(user_id: str, query: str, answer: str):
+def save_rag_history(user_id: str, query: str, answer: str, evidence: list, confidence: dict):
     """ドキュメント検索RAGの検索履歴を保存"""
     rag_history_container.upsert_item(
         {
@@ -235,6 +235,8 @@ def save_rag_history(user_id: str, query: str, answer: str):
             "user_id": user_id,
             "query": query,
             "answer": answer,
+            "evidence": evidence,
+            "confidence": confidence,
             "created_at": datetime.now().isoformat(),
         }
     )
@@ -242,7 +244,7 @@ def save_rag_history(user_id: str, query: str, answer: str):
 
 def get_rag_history(user_id: str) -> list[dict]:
     """ドキュメントRAG検索履歴を取得(新しい順)"""
-    query = "SELECT c.id, c.query, c.answer, c.created_at FROM c WHERE c.user_id = @uid ORDER BY c.created_at DESC"
+    query = "SELECT c.id, c.query, c.answer, c.evidence, c.confidence, c.created_at FROM c WHERE c.user_id = @uid ORDER BY c.created_at DESC"
     parameters = [{"name": "@uid", "value": user_id}]
     items = list(
         rag_history_container.query_items(

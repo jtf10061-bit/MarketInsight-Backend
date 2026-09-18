@@ -303,7 +303,7 @@ def rag_search(req: RagQueryRequests):
             from marketinsight_backend.rag import save_rag_history
 
             # ストリーミング完了後に、save_rag_historyを呼ぶ
-            save_rag_history(req.user_id, req.query, "".join(full_answer))
+            save_rag_history(req.user_id, req.query, "".join(full_answer), evidence, confidence)
 
     # StreamingResponse(): FastAPIのレスポンスクラス。一括ではなく逐次的にデータを返す
     # generate(): 上で定義したジェネレータ(クロージャ)を渡す。外側のfull_answerにアクセスできる
