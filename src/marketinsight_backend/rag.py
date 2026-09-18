@@ -187,9 +187,7 @@ def find_toc_pages(lines: list[dict], body_size: float) -> set:
 
     # 「目次」とだけ書かれた行を持つページが目次の起点
     starts = {
-        line["page"]
-        for line in lines
-        if line["text"].replace(" ", "").replace("　", "") == "目次"
+        line["page"] for line in lines if line["text"].replace(" ", "").replace("　", "") == "目次"
     }
 
     toc_pages = set(starts)
@@ -380,35 +378,6 @@ def process_pdf(file_path: str, filename: str):
     return {"filename": filename, "chunks": len(chunks)}
 
 
-def search_documents(query: str, n_results: int = 3) -> list[dict]:
-    # query: ユーザーの質問文
-    # n_results=3: 返す件数(デフォルト3件)
-    """質問に近いチャンクをtorageTypeで取得する"""
-    query_embedding = get_embedding(query)
-    # 質問分をベクトルに変換する    例: "AIの市場規模は？" → [0.02, -0.04, ...]
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=n_results,
-    )
-    # collection.query(): ChromaDBのベクトル検索メソッド
-    # query_embeddings: 毛なはどう国使うベクトル(リストで渡すので[]で囲む)
-    # n_rewults: 上位何件を返すか
-
-    search_results = []
-    for i in range(len(results["documents"][0])):
-        # results["documents"][0]: ヒットしたチャンクのテキスト一覧
-        # [0]: クエリを1つしか送っていないので、最初の結果をセット
-        # len(...): ヒット件数分ループ
-        search_results.append(
-            {
-                "content": results["documents"][0][i],
-                "filename": results["metadatas"][0][i]["filename"],
-            }
-        )
-
-    return search_results
-
-
 def get_cosmos_files() -> list[dict]:
     """アップロード済みファイルの一覧を取得する"""
     query = "SELECT DISTINCT c.filename, c.uploaded_at FROM c"
@@ -469,12 +438,24 @@ def delete_rag_history(user_id: str, history_id: str):
 
 
 def search_documents(query: str, n_results: int = 3) -> list[dict]:
-    """エビデンス表示"""
+    # query: ユーザーの質問文
+    # n_results=3: 返す件数(デフォルト3件)
+    """質問に近いチャンクをベクトル検索で取得し、エビデンス情報付きで返す"""
     query_embedding = get_embedding(query)
-    results = collection.query(query_embeddings=[query_embedding], n_results=n_results)
+    # 質問文をベクトルに変換する    例: "AIの市場規模は？" → [0.02, -0.04, ...]
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=n_results,
+    )
+    # collection.query(): ChromaDBのベクトル検索メソッド
+    # query_embeddings: 検索に使うベクトル(リストで渡すので[]で囲む)
+    # n_results: 上位何件を返すか
 
     search_result = []
     for i in range(len(results["documents"][0])):
+        # results["documents"][0]: ヒットしたチャンクのテキスト一覧
+        # [0]: クエリを1つしか送っていないので、最初の結果セット
+        # len(...): ヒット件数分ループ
         content = results["documents"][0][i]
         # チャンクの先頭行から章タイトルを抽出
         first_line = content.strip().split("\n")[0]
@@ -497,6 +478,9 @@ def search_documents(query: str, n_results: int = 3) -> list[dict]:
                 "section": meta.get("section") or first_line,
             }
         )
+    # 類似度が低すぎるチャンクを除外する(distance >= 1.2 は無関係とみなす)
+    search_result = [r for r in search_result if r["distance"] < 1.2]
+
     return search_result
 
 

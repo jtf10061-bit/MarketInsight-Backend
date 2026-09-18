@@ -277,6 +277,9 @@ def rag_search(req: RagQueryRequests):
 
     # 5. AIに質問 + コンテキストとしてまとめる
     prompt = f"""以下のドキュメントを参考に、質問に回答してください
+    ドキュメントに記載がない内容については「この質問に関する情報はドキュメントに含まれていません」と回答してください。
+    ドキュメントの内容に基づかない推測や一般知識での回答はしないでください。
+
 
 ## 参考ドキュメント
 {context}
@@ -292,6 +295,11 @@ def rag_search(req: RagQueryRequests):
     def generate():
         # 最初にエビデンス情報 + 信頼度を送る
         yield f"data: {json.dumps({'type': 'evidence', 'content': evidence, 'confidence': confidence}, ensure_ascii=False)}\n\n"
+
+        # 信頼度が低い場合はAIに聞かず、即終了
+        if confidence["score"] < 40:
+            yield f"data: {json.dumps({'type': 'answer', 'content': 'この質問に関する情報はドキュメントには含まれていません。'}, ensure_ascii=False)}\n\n"
+            return
 
         for step in run(prompt, [{"role": "user", "content": prompt}], model=req.model):
             # run(): 既存のReActループ関数。promptとhistoryを渡してAIに回答させる
