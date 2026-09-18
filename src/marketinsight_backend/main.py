@@ -88,6 +88,7 @@ class RagQueryRequests(BaseModel):
     query: str
     model: str = "aoai-gpt-4.1-mini"
     user_id: str = ""
+    mode: str = "search"
 
 
 # UPLOAD_DIR: アップロード先のフォルダ(MarketInsight-Backend/uploads/)
@@ -247,7 +248,12 @@ def rag_search(req: RagQueryRequests):
 
     # 1. ChromaDBからベクトル検索
     # search_documents(): ユーザーの質問文字列(req.query)を元にベクトル検索を実行し、関連チャンクを取得
-    results = search_documents(req.query)
+    # modeに応じて検索パラメータを変える
+    if req.mode == "reasoning":
+        results = search_documents(req.query, n_results=6)
+        results = [r for r in results if r["distance"] < 1.5]
+    else:
+        results = search_documents(req.query)
 
     # 2. エビデンス情報をSSEで先に送る
     # SSE: サーバーからWebブラウザ（クライアント）へ、リアルタイムにデータを連続送信（ストリーミング）するためのWEB標準技術
@@ -276,9 +282,27 @@ def rag_search(req: RagQueryRequests):
     context = "\n\n".join([f"【{r['filename']}】\n{r['content']}" for r in results])
 
     # 5. AIに質問 + コンテキストとしてまとめる
-    prompt = f"""以下のドキュメントを参考に、質問に回答してください
-    ドキュメントに記載がない内容については「この質問に関する情報はドキュメントに含まれていません」と回答してください。
-    ドキュメントの内容に基づかない推測や一般知識での回答はしないでください。
+
+    if req.mode == "reasoning":
+        prompt = f"""以下のドキュメントの情報を元に、質問に対して推論してください。
+
+    【ルール】
+    - ドキュメントに直接の記載がなくても、記載された情報から論理的に導ける結論を述べてください
+    - 推論の各ステップで、根拠となるドキュメントの記述を「【根拠】○○（ファイル名）に『△△』と記載」の形式で引用してください
+    - ドキュメントの情報から推論できない部分は「この部分は推論の範囲外です」と明記してください
+    - Web検索や一般知識は使わないでください
+    - 結論は**太字**で記載してください
+
+    ## 参考ドキュメント
+    {context}
+
+    ## 質問
+    {req.query}
+    """
+    else:
+        prompt = f"""以下のドキュメントを参考に、質問に回答してください
+        ドキュメントに記載がない内容については「この質問に関する情報はドキュメントに含まれていません」と回答してください。
+        ドキュメントの内容に基づかない推測や一般知識での回答はしないでください。
 
 
 ## 参考ドキュメント
@@ -294,10 +318,12 @@ def rag_search(req: RagQueryRequests):
     # ストリーミング生成：AIが回答を出力する際、全体の生成が完了するのを待つのではなく、生成されたテキストやデータから順次（リアルタイムに）クライアントへ送り返す仕組み
     def generate():
         # 最初にエビデンス情報 + 信頼度を送る
-        yield f"data: {json.dumps({'type': 'evidence', 'content': evidence, 'confidence': confidence}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'type': 'evidence', 'content': evidence, 'confidence': confidence, 'mode': req.mode}, ensure_ascii=False)}\n\n"
 
         # 信頼度が低い場合はAIに聞かず、即終了
-        if confidence["score"] < 40:
+        # 推論は間接的な情報から答えを導くので、類似度が低くても有用なチャンクがある。ただし20未満は本当に無関係なので止める
+        min_confidence = 20 if req.mode == "reasoning" else 40
+        if confidence["score"] < min_confidence:
             yield f"data: {json.dumps({'type': 'answer', 'content': 'この質問に関する情報はドキュメントには含まれていません。'}, ensure_ascii=False)}\n\n"
             return
 
@@ -319,7 +345,9 @@ def rag_search(req: RagQueryRequests):
             from marketinsight_backend.rag import save_rag_history
 
             # ストリーミング完了後に、save_rag_historyを呼ぶ
-            save_rag_history(req.user_id, req.query, "".join(full_answer), evidence, confidence)
+            save_rag_history(
+                req.user_id, req.query, "".join(full_answer), evidence, confidence, req.mode
+            )
 
     # StreamingResponse(): FastAPIのレスポンスクラス。一括ではなく逐次的にデータを返す
     # generate(): 上で定義したジェネレータ(クロージャ)を渡す。外側のfull_answerにアクセスできる
