@@ -22,7 +22,9 @@ cosmos_client = CosmosClient(
     os.getenv("COSMOS_KEY"),
 )
 database = cosmos_client.get_database_client("history")
+# コンテナ取得
 rag_container = database.get_container_client("rag-documents")
+rag_history_container = database.get_container_client("rag-history")
 
 # ChromaDBクライアント(ローカルに保存)
 CHROMA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "chroma_db")
@@ -222,3 +224,34 @@ def delete_document(filename: str):
     # ChromaDBからそのファイルのチャンクを全て削除
     # collection.delete(where=...): ChromaDBのメタデータ条件指定削除
     collection.delete(where={"filename": filename})
+
+
+# ドキュメント検索RAG関連
+def save_rag_history(user_id: str, query: str, answer: str):
+    """ドキュメント検索RAGの検索履歴を保存"""
+    rag_history_container.upsert_item(
+        {
+            "id": f"{user_id}_{datetime.now().timestamp()}",
+            "user_id": user_id,
+            "query": query,
+            "answer": answer,
+            "created_at": datetime.now().isoformat(),
+        }
+    )
+
+
+def get_rag_history(user_id: str) -> list[dict]:
+    """ドキュメントRAG検索履歴を取得(新しい順)"""
+    query = "SELECT c.id, c.query, c.answer, c.created_at FROM c WHERE c.user_id = @uid ORDER BY c.created_at DESC"
+    parameters = [{"name": "@uid", "value": user_id}]
+    items = list(
+        rag_history_container.query_items(
+            query, parameters=parameters, enable_cross_partition_query=True
+        )
+    )
+    return items
+
+
+def delete_rag_history(user_id: str, history_id: str):
+    """ドキュメントRAG検索履歴を1件、削除"""
+    rag_history_container.delete_item(history_id, partition_key=user_id)
