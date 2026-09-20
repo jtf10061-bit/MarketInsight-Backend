@@ -20,7 +20,7 @@ from pathlib import Path
 from azure.cosmos import CosmosClient
 from datetime import datetime
 
-load_dotenv(Path(__file__).parent.parent.parent / ".env")
+load_dotenv(Path(__file__).parent.parent.parent / ".env", override=True)
 
 # CosmosDBクライアント(メタ情報とテキスト保存用)
 cosmos_client = CosmosClient(
@@ -65,6 +65,10 @@ OpenAI(...): OpenAI互換のAPIクライアントを作成する。
 EMBEDDING_MODEL = os.getenv("AZURE_OPENAI_EMBEDDING_MODEL", "text-embedding-ada-002")
 # "text-embedding-ada-002 → 環境変数があればそれを使い("AZURE_OPENAI_EMBEDDING_MODEL")、なければ"text-embedding-ada-002"をデフォルト値とする
 
+print("=== DEBUG ===")
+print("ENDPOINT:", os.getenv("AZURE_OPENAI_ENDPOINT"))
+print("API_KEY starts with:", os.getenv("AZURE_OPENAI_API_KEY", "")[:4])
+print("MODEL:", EMBEDDING_MODEL)
 
 # 見出しらしい書き方のパターン  例: 第1章 / 第１条 / 1.2 / ３．
 HEADING_PATTERN = re.compile(
@@ -376,6 +380,231 @@ def process_pdf(file_path: str, filename: str):
 
     # 処理したファイル名とチャンク数を返す  例: {"filename": "AI市場レポート.pdf", "chunks": 12}
     return {"filename": filename, "chunks": len(chunks)}
+
+
+def process_file(file_path: str, filename: str):
+    """拡張子に応じてテキスト抽出 → チャンク分割 → ChromaDB保存"""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == ".pdf":
+        process_pdf(file_path, filename)
+    elif ext == ".docx":
+        text = extract_text_from_docx(file_path)
+        chunks = split_text_into_chunks(text, filename)
+        save_chunks(chunks, filename)
+    elif ext == ".txt":
+        text = extract_text_from_txt(file_path)
+        chunks = split_text_into_chunks(text, filename)
+        save_chunks(chunks, filename)
+    elif ext == ".xlsx":
+        text = extract_text_from_xlsx(file_path)
+        chunks = split_text_into_chunks(text, filename)
+        save_chunks(chunks, filename)
+    elif ext == ".pptx":
+        text = extract_text_from_pptx(file_path)
+        chunks = split_text_into_chunks(text, filename)
+        save_chunks(chunks, filename)
+    else:
+        raise ValueError(f"未対応の形式です: {ext}")
+
+
+def extract_text_from_docx(file_path: str) -> str:
+    """
+    Wordドキュメント(.docx)から本文段落および表(テーブル)のテキストを抽出する関数
+    Parameters:
+        file_path(str): テキストを抽出したいWordファイルのパス
+    Returns:
+        str: 抽出した段落及び表のセルテキストを改行コード(\n)で連結した文字列
+            空行は自動的に除外され、セル同士は " | " で結合されます
+    """
+    from docx import Document
+
+    doc = Document(file_path)
+    lines = []
+    # 本文段落のテキストを取得(空業以外)
+    for para in doc.paragraphs:
+        if para.text.strip():
+            lines.append(para.text)
+    # 表(テーブル)内のテキストを業ごとに " | " 区切りで抽出
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+def extract_text_from_txt(file_path: str) -> str:
+    with open(file_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def extract_text_from_xlsx(file_path: str) -> str:
+    """
+    Excelファイル(.xlsx)から全シートのセルデータを抽出してテキスト化する関数
+    Parameters:
+        file_path(str): 読み込むExcelファイルのパス
+    Returns:
+        str: 各シートのデータを " | " 区切りで表形式風に連結したテキスト
+    """
+    # openpyxlからワークブック(Excelファイル)を読み込む関数をインポート
+    from openpyxl import load_workbook
+
+    # Excelファイルをロード
+    # data_only=True: セル内の数式ではなく、計算された結果の値を取得する
+    wb = load_workbook(file_path, data_only=True)
+
+    # 抽出したテキスト行を蓄積するリスト
+    lines = []
+
+    # ワークブック内の全シート名をループ処理
+    for sheet_name in wb.sheetnames:
+        # シート名を使ってワークシートオブジェクトを取得
+        ws = wb[sheet_name]
+
+        # 区切りとして、シート名をMarkdown見出し(##)形式でリストに追加
+        lines.append(f"## シート: {sheet_name}")
+
+        # ws.inter_rows(): シート内の全行を1行ずつループ処理
+        # value_only=True: セルオブジェクトではなく、セルの値(文字列や数値)のみを直接取得
+        for row in ws.iter_rows(values_only=True):
+            # セルがNoneでなければ、文字列(str)に変換し、Noneなら""に変換する
+            cells = [str(cell) if cell is not None else "" for cell in row]
+
+            # any(cells): 行の中に1つでもデータ(空文字以外)が存在するか判定
+            # 全てのセルが空欄の完全な空行は除外する
+            if any(cells):
+                # 行内の各セルを " | " (パイプ)で結合して、1行の表敬s木風テキストを作成
+                lines.append(" | ".join(cells))
+    # 蓄積した全ての行を開業コード(\n)で結合して1つのテキストとして返す
+    return "\n".join(lines)
+
+
+def extract_text_from_pptx(file_path: str) -> str:
+    """
+    PowerPointファイル(.pptx)から全スライドのテキスト及び表データを抽出する関数
+    Paramerters:
+        file_path(str): 対象のPowerPointファイルのパス
+    Returns:
+        str: スライドごとのテキスト・表データを抽出して連結したテキスト
+    """
+    # python-pptxライブラリからPresentationオブジェクトを読み込み
+    from pptx import Presentation
+
+    # プレゼンテーションファイルをロード
+    prs = Presentation(file_path)
+    lines = []
+    # enumerate(..., 1): スライドのリストを1始まりのインデックス(スライド番号)付きでループ
+    for i, slide in enumerate(prs.slides, 1):
+        # 見出しとしてスライド番号をMarkdown系sきで追加
+        lines.append(f"## スライド {i}")
+
+        # スライド上の全ての要素(図形、テキストボックス、表など)を操作
+        for shape in slide.shapes:
+            # 要素がテキストフレーム(文章)を持っている場合
+            if shape.has_text_frame:
+                # フレーム内の段落を1つずつ取得
+                for para in shape.text_frame.paragraphs:
+                    # para.text.strip(): 前後の空白そ削除し、空行を除去し、空行でなければ追加
+                    if para.text.strip():
+                        lines.append(para.text)
+
+            # 要素が表(テーブル)を持っている場合
+            if shape.has_table:
+                # 表の全行を取得
+                for row in shape.table.rows:
+                    # 各セルのテキストを取り出し、前後の空白を削除
+                    cells = [cell.text.strip() for cell in row.cells]
+                    # セル同士を " | " で結合して追加
+                    lines.append(" | ".join(cells))
+    # 全行を開業コード(\n)で連結して返す
+    return "\n".join(lines)
+
+
+def save_chunks(chunks: list[dict], filename: str):
+    """
+    分割されたテキストチャンクをChromaDB(ベクトルDB)及びCosmosDB(メタデータ)に保存する関数
+    Parameters:
+        chunks(list[dict]): 分割されたテキストチャンク情報の辞書リスト
+        filename(str): 元ドキュメントのファイル名
+    """
+    # 渡された各チャンク(辞書型)をループ
+    for chunk in chunks:
+        # get_embedding(): チャンクの本文テキストからベクトルを生成
+        embedding = get_embedding(chunk["content"])
+        # DB内で一意となるチャンクIDを生成(例："sample.pdf_chunk_0")
+        chunk_id = f"{filename}_chunk_{chunk['chunk_index']}"
+
+        # collection.upsert(): ChromaDBにデータ追加・更新
+        collection.upsert(
+            # チャンク識別様のIDリスト
+            ids=[chunk_id],
+            # 検索様のベクトルデータ
+            embeddings=[embedding],
+            # 実際に検索・参照されるテキスト本文
+            documents=[chunk["content"]],
+            # フィルタリングや参照ように使用するメタデータ(元のファイル名、ページ番号、行番号など)
+            metadatas=[
+                {
+                    "filename": filename,
+                    "chunk_index": chunk["chunk_index"],
+                    # get()を使うことで、キーが存在しない場合でもKeyErrorを防ぎデフォルト値を設定
+                    "section": chunk.get("section", ""),
+                    "page": chunk.get("page"),
+                    "page_end": chunk.get("page_end"),
+                    "line_start": chunk.get("line_start"),
+                    "line_end": chunk.get("line_end"),
+                }
+            ],
+        )
+    # Cosmos DB側にもファイルレベルのメタデータ管理レコードを永続化・保存
+    save_to_cosmos(filename, chunks)
+
+
+def split_text_into_chunks(text: str, filename: str, chunk_size: int = 500) -> list[dict]:
+    """プレーンテキストを一定文字数ごとにチャンク分割する"""
+    lines = text.split("\n")
+    chunks = []
+    current_chunk = []
+    current_length = 0
+    section = ""
+
+    for line in lines:
+        # ## で始まる行をセクション名として記憶
+        if line.startswith("## "):
+            section = line.replace("## ", "")
+
+        current_chunk.append(line)
+        current_length += len(line)
+
+        if current_length >= chunk_size:
+            chunks.append(
+                {
+                    "content": "\n".join(current_chunk),
+                    "chunk_index": len(chunks),
+                    "section": section,
+                    "page": None,
+                    "page_end": None,
+                    "line_start": None,
+                    "line_end": None,
+                }
+            )
+            current_chunk = []
+            current_length = 0
+
+    # 残りのテキスト
+    if current_chunk:
+        chunks.append(
+            {
+                "content": "\n".join(current_chunk),
+                "chunk_index": len(chunks),
+                "section": section,
+                "page": None,
+                "page_end": None,
+                "line_start": None,
+                "line_end": None,
+            }
+        )
+
+    return chunks
 
 
 def get_cosmos_files() -> list[dict]:
