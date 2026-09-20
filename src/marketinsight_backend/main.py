@@ -1,4 +1,10 @@
-from fastapi import FastAPI, UploadFile, File  # アプリ本体。app = FastAPI() でサーバーを作る。
+from fastapi import (
+    FastAPI,
+    UploadFile,
+    File,
+    Form,
+    HTTPException,
+)  # アプリ本体。app = FastAPI() でサーバーを作る。
 import os
 from fastapi.middleware.cors import (
     CORSMiddleware,
@@ -28,6 +34,14 @@ from marketinsight_history.chat_service import (
 )
 from marketinsight_agent.config import MODELS
 from marketinsight_backend.rag import search_documents
+
+from marketinsight_backend.minutes import (
+    transcribe_audio,
+    generate_minutes,
+    save_minutes,
+    get_minutes_history,
+    get_minutesdetail,
+)
 
 """
 FastAPIは
@@ -377,3 +391,50 @@ def rag_search(req: RagQueryRequests):
     # generate(): 上で定義したジェネレータ(クロージャ)を渡す。外側のfull_answerにアクセスできる
     # media_type: "text/event-stream": SSE形式であることをブラウザに伝えるContent-Type
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# --- 議事録: 音声アップロード + 文字起こし + 議事録生成 ---
+@app.post("/minutes/upload")
+# UploadFile = File(...): マルチパートフォームデータからアップロードされた音声ファイルを受け取る(必須項目)
+# user_id: File(...): フォームデータからユーザーIDを受け取る(未指定の場合は、test-userを使用)
+async def upload_audio(file: UploadFile = File(...), user_id: str = Form("test-user")):
+    # os.path.splitext(): ファイル名から拡張子を抽出する
+    # .lower(): 拡張子を小文字に統一して比較する
+    ext = os.path.splitext(file.filename)[1].lower()
+    # 許可されたファイル形式かをチェック
+    if ext not in {".mp4", ".m4a", ".wav", ".webm", ".mp3"}:
+        # 未対応の場合は、HTTP 400 Bad Requestのエラーを返し、処理を中断
+        raise HTTPException(status_code=400, detail=f"未対応の音声形式です: {ext}")
+
+    # 保存先フォルダとファイル名を組み合わせた保存用パスを作成
+    file_path = f"uploads/{file.filename}"
+    with open(file_path, "wb") as f:
+        # await file.read(): アップロードされたデータを非同期で読み込み。ローカルディスクに書き込み保存する
+        f.write(await file.read())
+
+    try:
+        # transcribe_audio(): 保存した音声フェイルをWhisper等の音声認識機能にわたし、文字起こしテキストを取得する
+        transcript = transcribe_audio(file_path)
+        # generate_minutes(): 文字起こしテキストを元に、LLM(OpenAI等)を非同期呼び出しして議事録Markdownを生成する
+        minutes = await generate_minutes(transcript, file.filename)
+        # save_minutes(): ユーザーID、ファイル名、文字起こし、生成された議事録をCosmosDBに保存し、ドキュメントIDを取得
+        doc_id = save_minutes(user_id, file.filename, transcript, minutes)
+        # 処理結果をJSONレスポンスとして返却
+        return {"status": "ok", "id": doc_id, "minutes": minutes, "transcript": transcript}
+    finally:
+        # os.remove(): 文字起こし、保存完了後に、サーバー上に一時作成した音声ファイルを削除
+        os.remove(file_path)
+
+
+@app.get("/minutes/history/{user_id}")
+async def minutes_history(user_id: str):
+    result = get_minutes_history(user_id)
+    return result
+
+
+@app.get("/minutes/{minutes_id}")
+async def minutes_detail(minutes_id: str):
+    result = get_minutesdetail(minutes_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Minutes not Found")
+    return result
