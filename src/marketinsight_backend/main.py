@@ -41,6 +41,7 @@ from marketinsight_backend.minutes import (
     save_minutes,
     get_minutes_history,
     get_minutesdetail,
+    delete_minutes,
 )
 
 """
@@ -438,3 +439,9 @@ async def minutes_detail(minutes_id: str):
     if result is None:
         raise HTTPException(status_code=404, detail="Minutes not Found")
     return result
+
+
+@app.delete("/minutes/{minutes_id}")
+async def minutes_delete(minutes_id: str):
+    delete_minutes(minutes_id)
+    return {"status": "ok"}
