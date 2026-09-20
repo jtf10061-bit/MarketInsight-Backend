@@ -8,7 +8,6 @@ from fastapi.middleware.cors import (
 # （これがないとブラウザのセキュリティ機能で通信がブロックされてしまうため）
 from fastapi.responses import StreamingResponse  # レスポンスを一括ではなくストリーミングで返す
 from pydantic import BaseModel
-from marketinsight_backend.rag import process_pdf
 
 """
 リクエストのバリデーション（型チェック）用。ChatRequest で message: str と定義すると、FastAPIが自動的に:
@@ -187,18 +186,43 @@ def get_models():
 @app.post("/upload")
 # UploadFile: FastAPIでファイルアップロードを受け取る型
 # File(...): このパラメータは必須ファイルという指定
-async def upload_pdf(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
-        return {"error": "PDFファイルのみアップロード可能です"}
+# async def upload_pdf(file: UploadFile = File(...)):
+#     if not file.filename.endswith(".pdf"):
+#         return {"error": "PDFファイルのみアップロード可能です"}
 
+#     file_path = os.path.join(UPLOAD_DIR, file.filename)
+#     with open(file_path, "wb") as f:
+#         # await file.read(): アップロードされたファイルの中身を読み取る
+#         content = await file.read()
+#         f.write(content)
+
+#     process_pdf(file_path, file.filename)
+
+#     return {"filename": file.filename, "status": "uploaded"}
+async def upload_file(file: UploadFile = File(...)):
+    # 対応拡張子のチェック
+    allowed_ext = (".pdf", ".docx", ".txt", ".xlsx", ".pptx")
+
+    # file.filename.lower(): 大文字小文字の表記揺れを避けるために、小文字に統一
+    # endswith(): ファイル名が許可された拡張子のいずれかで終わっているかをチェック
+    if not file.filename.lower().endswith(allowed_ext):
+        # 許可されていない形式の場合は、エラーメッセージのJSONを返して処理を中断
+        return {"error": "対応形式: PDF, DOCX, TXT, XLSX, PPTX"}
+
+    # os.path.join(): 保存先ディレクトリとファイル名を安全に結合してフルパスを作成する
     file_path = os.path.join(UPLOAD_DIR, file.filename)
+    # open(..., "wb"): ファイルをバイナリ書き込みモード(wb)でオープン
     with open(file_path, "wb") as f:
-        # await file.read(): アップロードされたファイルの中身を読み取る
+        # await file.read(): アップロードされたファイルの内容を非同期で読み込み(メモリ上に取得)
         content = await file.read()
+        # ローカルディスクの指定パスにファイルを書き込んで保存
         f.write(content)
+    # モジュール遅延インポート: RAG処理よう関数を必要なタイミングで読み込み
+    from marketinsight_backend.rag import process_file
 
-    process_pdf(file_path, file.filename)
-
+    # process_file(): 保存したファイルを読み込み、テキスト抽出・チャンク分割・ベクトルDB登録などの前処理を実行
+    process_file(file_path, file.filename)
+    # アップロード完了メッセージとファイル名をレスポンスJSONとして返却
     return {"filename": file.filename, "status": "uploaded"}
 
 
