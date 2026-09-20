@@ -187,3 +187,17 @@ def get_minutesdetail(minutes_id: str) -> dict | None:
     # 該当データが存在すれば先頭の1件をなければNoneを返却する
     return results[0] if results else None
     # pass
+
+
+# --- 6. 削除 ---
+def delete_minutes(minutes_id: str):
+    container = _get_cosmos_container()
+    items = list(
+        container.query_items(
+            query="SELECT c.id, c.user_id FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": minutes_id}],
+            enable_cross_partition_query=True,
+        )
+    )
+    if items:
+        container.delete_item(items[0]["id"], partition_key=items[0]["user_id"])
