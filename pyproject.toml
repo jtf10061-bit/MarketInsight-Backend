@@ -12,6 +12,8 @@ dependencies = [
     "python-docx",
     "openpyxl",
     "python-pptx",
+    "openai-whisper",
+    "ffmpeg-python",
 ]
 
 [tool.hatch.build.targets.wheel]
