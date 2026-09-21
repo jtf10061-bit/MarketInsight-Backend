@@ -757,3 +757,72 @@ def calculate_confidence(results: list[dict]) -> dict:
             "context_richness": round(context_score, 1),
         },
     }
+
+
+def summarize_document(filename: str, user_id: str):
+    # 1.    ChromaDBから指定ファイルの全チャンクを取得する
+    #       要約ではベクトル検索ではなく、ファイル名で全件取得する
+    results = collection.get(where={"filename": filename})
+
+    # 2. チャンクが見つからなかった場合
+    if not results["documents"]:
+        return {"summary": "指定されたファイルのデーがが見つかりません"}
+
+    # 3. 全チャンクのテキストを結合
+    full_text = "\n".join(results["documents"])
+
+    # 4. AOAIクライアントを作成
+    ai_client = AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version="2024-06-01",
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    )
+
+    # 5. AOAIに要約を依頼
+    response = ai_client.chat.completions.create(
+        model=os.getenv("AZURE_OPEN_DEPLOYMENT"),
+        messages=[
+            {
+                "role": "system",
+                "content": "あなたは文章要約の専門家です。文章全体を読み、構造化された要約をMarkdown形式で作成してください。",
+            },
+            {
+                "role": "user",
+                "content": f"""以下の文章を要約してください。
+
+## 出力フォーマット:
+### 概要
+（文書全体の要約を2〜3文で）
+
+### 主要セクション
+- セクション名: 内容の要約
+
+### 重要ポイント
+- 箇条書きで重要な情報を列挙
+
+---
+ファイル名: {filename}
+文書内容:
+{full_text}
+""",
+            },
+        ],
+        temperature=0.3,
+    )
+
+    summary = response.choices[0].message.content
+
+    # 6. CosmosDBに保存
+    rag_history_container.upsert_item(
+        {
+            "id": f"{user_id}_{datetime.now().timestamp()}",
+            "user_id": user_id,
+            "filename": filename,
+            "summary": summary,
+            "mode": "summary",
+            "created_at": datetime.now().isoformat(),
+        }
+    )
+
+    # 7. フロントエンドに返す
+    return {"summary": summary, "filename": filename}
