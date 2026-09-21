@@ -4,6 +4,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    BackgroundTasks,
 )  # アプリ本体。app = FastAPI() でサーバーを作る。
 import os
 from fastapi.middleware.cors import (
@@ -42,13 +43,14 @@ from marketinsight_backend.rag import (
 )
 
 from marketinsight_backend.minutes import (
-    transcribe_audio,
-    generate_minutes,
-    save_minutes,
     get_minutes_history,
     get_minutesdetail,
     delete_minutes,
+    jobs,
+    process_minutes_job,
 )
+import uuid
+
 
 """
 FastAPIは
@@ -207,19 +209,6 @@ def get_models():
 @app.post("/upload")
 # UploadFile: FastAPIでファイルアップロードを受け取る型
 # File(...): このパラメータは必須ファイルという指定
-# async def upload_pdf(file: UploadFile = File(...)):
-#     if not file.filename.endswith(".pdf"):
-#         return {"error": "PDFファイルのみアップロード可能です"}
-
-#     file_path = os.path.join(UPLOAD_DIR, file.filename)
-#     with open(file_path, "wb") as f:
-#         # await file.read(): アップロードされたファイルの中身を読み取る
-#         content = await file.read()
-#         f.write(content)
-
-#     process_pdf(file_path, file.filename)
-
-#     return {"filename": file.filename, "status": "uploaded"}
 async def upload_file(file: UploadFile = File(...)):
     # 対応拡張子のチェック
     allowed_ext = (".pdf", ".docx", ".txt", ".xlsx", ".pptx")
@@ -402,35 +391,42 @@ def rag_search(req: RagQueryRequests):
 
 # --- 議事録: 音声アップロード + 文字起こし + 議事録生成 ---
 @app.post("/minutes/upload")
-# UploadFile = File(...): マルチパートフォームデータからアップロードされた音声ファイルを受け取る(必須項目)
-# user_id: File(...): フォームデータからユーザーIDを受け取る(未指定の場合は、test-userを使用)
-async def upload_audio(file: UploadFile = File(...), user_id: str = Form("test-user")):
-    # os.path.splitext(): ファイル名から拡張子を抽出する
-    # .lower(): 拡張子を小文字に統一して比較する
+async def upload_audio(
+    file: UploadFile = File(...),
+    user_id: str = Form("test-user"),
+    background_tasks: BackgroundTasks = None,
+):
     ext = os.path.splitext(file.filename)[1].lower()
-    # 許可されたファイル形式かをチェック
     if ext not in {".mp4", ".m4a", ".wav", ".webm", ".mp3"}:
-        # 未対応の場合は、HTTP 400 Bad Requestのエラーを返し、処理を中断
         raise HTTPException(status_code=400, detail=f"未対応の音声形式です: {ext}")
 
-    # 保存先フォルダとファイル名を組み合わせた保存用パスを作成
     file_path = f"uploads/{file.filename}"
     with open(file_path, "wb") as f:
-        # await file.read(): アップロードされたデータを非同期で読み込み。ローカルディスクに書き込み保存する
         f.write(await file.read())
 
-    try:
-        # transcribe_audio(): 保存した音声フェイルをWhisper等の音声認識機能にわたし、文字起こしテキストを取得する
-        transcript = transcribe_audio(file_path)
-        # generate_minutes(): 文字起こしテキストを元に、LLM(OpenAI等)を非同期呼び出しして議事録Markdownを生成する
-        minutes = await generate_minutes(transcript, file.filename)
-        # save_minutes(): ユーザーID、ファイル名、文字起こし、生成された議事録をCosmosDBに保存し、ドキュメントIDを取得
-        doc_id = save_minutes(user_id, file.filename, transcript, minutes)
-        # 処理結果をJSONレスポンスとして返却
-        return {"status": "ok", "id": doc_id, "minutes": minutes, "transcript": transcript}
-    finally:
-        # os.remove(): 文字起こし、保存完了後に、サーバー上に一時作成した音声ファイルを削除
-        os.remove(file_path)
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"status": "processing"}
+    background_tasks.add_task(process_minutes_job, job_id, file_path, file.filename, user_id)
+
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/minutes/status/{job_id}")
+async def minutes_status(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job Not Found")
+    return {"job_id": job_id, "status": job["status"], "error": job.get("error", "")}
+
+
+@app.get("/minutes/result/{job_id}")
+async def minutes_result(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job Not Found")
+    if job["status"] != "completed":
+        return {"job_id": job_id, "status": job["status"]}
+    return {"status": "ok", **job["result"]}
 
 
 @app.get("/minutes/history/{user_id}")
