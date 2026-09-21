@@ -33,7 +33,13 @@ from marketinsight_history.chat_service import (
     add_message,
 )
 from marketinsight_agent.config import MODELS
-from marketinsight_backend.rag import search_documents
+from marketinsight_backend.rag import (
+    search_documents,
+    summarize_document,
+    get_summary_history,
+    delete_summary,
+    get_summary_detail,
+)
 
 from marketinsight_backend.minutes import (
     transcribe_audio,
@@ -43,7 +49,6 @@ from marketinsight_backend.minutes import (
     get_minutesdetail,
     delete_minutes,
 )
-from marketinsight_backend.rag import summarize_document
 
 """
 FastAPIは
@@ -452,3 +457,22 @@ async def minutes_delete(minutes_id: str):
 async def rag_summarize(body: dict):
     result = summarize_document(body["filename"], body["user_id"])
     return result
+
+
+@app.get("/rag/summary/history/{user_id}")
+async def rag_summary_history(user_id: str):
+    return get_summary_history(user_id)
+
+
+@app.get("/rag/summary/{summary_id}")
+async def rag_summary_detail(summary_id: str):
+    result = get_summary_detail(summary_id)
+    if result is None:
+        return {"error": "Not Found"}
+    return result
+
+
+@app.delete("/rag/summary/{summary_id}")
+async def rag_summary_delete(summary_id: str, user_id: str = "test-user"):
+    delete_summary(summary_id, user_id)
+    return {"status": "deleted"}
