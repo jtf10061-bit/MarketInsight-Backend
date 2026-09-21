@@ -278,10 +278,18 @@ def process_minutes_job(job_id: str, file_path: str, filename: str, user_id: str
 
         loop = asyncio.new_event_loop()
         minutes = loop.run_until_complete(generate_minutes(transcript, filename))
-        loop.close()
+
+        # 議事録からタイトルを抽出（# で始まる最初の行）
+        title = filename
+        for line in minutes.split("\n"):
+            line = line.strip()
+            if line.startswith("# "):
+                title = line.lstrip("# ").strip()
+                title = title.replace("会議タイトル: ", "").replace("会議タイトル:", "")
+                break
 
         jobs[job_id]["status"] = "saving"
-        doc_id = save_minutes(user_id, filename, transcript, minutes)
+        doc_id = save_minutes(user_id, title, transcript, minutes)
 
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["result"] = {"id": doc_id, "transcript": transcript, "minutes": minutes}
