@@ -43,6 +43,7 @@ from marketinsight_backend.minutes import (
     get_minutesdetail,
     delete_minutes,
 )
+from marketinsight_backend.rag import summarize_document
 
 """
 FastAPIは
@@ -445,3 +446,9 @@ async def minutes_detail(minutes_id: str):
 async def minutes_delete(minutes_id: str):
     delete_minutes(minutes_id)
     return {"status": "ok"}
+
+
+@app.post("/rag/summarize")
+async def rag_summarize(body: dict):
+    result = summarize_document(body["filename"], body["user_id"])
+    return result
