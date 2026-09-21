@@ -654,7 +654,7 @@ def save_rag_history(
 
 def get_rag_history(user_id: str) -> list[dict]:
     """ドキュメントRAG検索履歴を取得(新しい順)"""
-    query = "SELECT c.id, c.query, c.answer, c.evidence, c.confidence, c.mode, c.created_at FROM c WHERE c.user_id = @uid ORDER BY c.created_at DESC"
+    query = "SELECT c.id, c.query, c.answer, c.evidence, c.confidence, c.mode, c.created_at FROM c WHERE c.user_id = @uid AND c.mode != 'summary' ORDER BY c.created_at DESC"
     parameters = [{"name": "@uid", "value": user_id}]
     items = list(
         rag_history_container.query_items(
@@ -826,3 +826,33 @@ def summarize_document(filename: str, user_id: str):
 
     # 7. フロントエンドに返す
     return {"summary": summary, "filename": filename}
+
+
+# 要約の履歴
+def get_summary_history(user_id: str) -> list[dict]:
+    query = "SELECT c.id, c.filename, c.summary, c.created_at FROM c WHERE c.user_id = @uid AND c.mode = 'summary' ORDER BY c.created_at DESC"
+    parameters = [{"name": "@uid", "value": user_id}]
+    items = list(
+        rag_history_container.query_items(
+            query, parameters=parameters, enable_cross_partition_query=True
+        )
+    )
+    return items
+
+
+# 要約の詳細取得
+def get_summary_detail(summary_id: str) -> dict | None:
+    query = "SELECT * FROM c WHERE c.id = @id"
+    items = list(
+        rag_history_container.query_items(
+            query,
+            parameters=[{"name": "@id", "value": summary_id}],
+            enable_cross_partition_query=True,
+        )
+    )
+    return items[0] if items else None
+
+
+# 要約の削除
+def delete_summary(summary_id: str, user_id: str):
+    rag_history_container.delete_item(summary_id, partition_key=user_id)
