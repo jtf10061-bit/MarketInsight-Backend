@@ -1,10 +1,13 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-import whisper  # OpenAI社が開発・オープンソース化した、高性能な音声認識（文字起こし）AIモデル
+
+# import whisper  # OpenAI社が開発・オープンソース化した、高性能な音声認識（文字起こし）AIモデル
+import whisperx
 from openai import AzureOpenAI
 from datetime import datetime
 import uuid
+import pandas as pd
 
 
 # 環境変数をロードするためのヘルパー関数
@@ -43,19 +46,72 @@ def transcribe_audio(file_path: str) -> str:
     """
     音声ファイルを受け取り、文字起こしテキストを返す
     """
+    _load_env()
+    # 推論をCPUで行うように指定している
+    device = "cpu"
+    # 話者分離のHugging Faceのアクセストークン を環境変数から取得
+    hf_token = os.getenv("HF_TOKEN")
+
     # 1. モデルをロード(初回はDLが走る)
     # "base": モデルサイズ(tiny / base / small / medium / large)をしてい
     # ※ 初回実行時はモデルの重みファイル(約140MB)がインターネットから自動DLされる
-    model = whisper.load_model("base")
+    model = whisperx.load_model("base", device=device)
 
     # 2. 文字起こし実行
     # language="ja": 言語を日本語に明示指定(自動判別の誤認識を防ぎ、精度と処理速度を向上)
+    # 指定された音声ファイルを読み込み、日本語として文字起こしを実行する
     result = model.transcribe(file_path, language="ja")
 
-    # 3. テキストを返す
-    # 実行結果オブジェクト(辞書型)から、文字起こしされた本文テキスト("text")を取り出して返却する
-    return result["text"]
-    # pass
+    # 3. タイムスタンプ整列
+    # 日本語用の音声を単語レベルでタイムスタンプと同期させるための専用モデル(align_model)としてメタデータをロードする
+    align_model, metadata = whisperx.load_align_model(language_code="ja", device=device)
+
+    # 4. 話者分離
+    from pyannote.audio import Pipeline
+    import torchaudio
+    import subprocess
+
+    diarize_pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1",
+        token=hf_token,
+    )
+
+    # webm など torchaudio が読めない形式は wav に変換
+    wav_path = file_path.rsplit(".", 1)[0] + ".wav"
+    subprocess.run(["ffmpeg", "-y", "-i", file_path, wav_path], capture_output=True)
+
+    waveform, sample_rate = torchaudio.load(wav_path)
+    audio = {"waveform": waveform, "sample_rate": sample_rate}
+    diarize_result = diarize_pipeline(audio)
+
+    print(f"DEBUG type: {type(diarize_result)}")
+    print(f"DEBUG dir: {[m for m in dir(diarize_result) if not m.startswith('_')]}")
+
+    # 変換した wav を削除
+    if os.path.exists(wav_path):
+        os.remove(wav_path)
+
+    diarize_result = diarize_pipeline(audio)
+
+    # DiarizeOutput から Annotation を取得し DataFrame に変換
+    annotation = diarize_result.speaker_diarization
+    diarize_df = pd.DataFrame(
+        [
+            {"start": segment.start, "end": segment.end, "speaker": label}
+            for segment, _, label in annotation.itertracks(yield_label=True)
+        ]
+    )
+
+    # 話者ラベル付与
+    result = whisperx.assign_word_speakers(diarize_df, result)
+
+    # 話者付きテキストに変換
+    lines = []
+    for seg in result["segments"]:
+        speaker = seg.get("speaker", "不明")
+        text = seg.get("text", "")
+        lines.append(f"{speaker}: {text}")
+    return "\n".join(lines)
 
 
 # --- 2. 議事録生成 ---
@@ -190,6 +246,7 @@ def get_minutesdetail(minutes_id: str) -> dict | None:
 
 
 # --- 6. 削除 ---
+# minutes_id: 引数として削除したい議事録の識別子を文字列として受け取る
 def delete_minutes(minutes_id: str):
     container = _get_cosmos_container()
     items = list(
@@ -201,3 +258,36 @@ def delete_minutes(minutes_id: str):
     )
     if items:
         container.delete_item(items[0]["id"], partition_key=items[0]["user_id"])
+
+
+# ジョブの状態を保持する辞書
+jobs: dict[str, dict] = {}
+
+
+# ジョブの状態をメモリ上の辞書で管理
+def process_minutes_job(job_id: str, file_path: str, filename: str, user_id: str):
+    """バックグラウンドで実行される処理"""
+    try:
+        jobs[job_id]["status"] = "transcribing"
+        transcript = transcribe_audio(file_path)
+
+        jobs[job_id]["status"] = "generating"
+        # generate_minutesはasyncなので注意が必要
+        # BackgroundTasksは同期関数で動くため、asyncio.run()で呼ぶ
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        minutes = loop.run_until_complete(generate_minutes(transcript, filename))
+        loop.close()
+
+        jobs[job_id]["status"] = "saving"
+        doc_id = save_minutes(user_id, filename, transcript, minutes)
+
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["result"] = {"id": doc_id, "transcript": transcript, "minutes": minutes}
+    except Exception as e:
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["error"] = str(e)
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
