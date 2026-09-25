@@ -5,13 +5,16 @@ import os
 import json
 
 
-def search_minutes_chunks(minutes_ids: list[str], n_results: int = 10) -> list[str]:
+def search_minutes_chunks(
+    minutes_ids: list[str], query: str = "", n_results: int = 10
+) -> list[str]:
     """指定された議事録のチャンクをベクトル検索で取得"""
     # minutes_ids -> rag_filenameに変換
     rag_filenames = [f"minutes__{mid}" for mid in minutes_ids]
 
     # タスク抽出に関連するキーワードで検索
-    query = "タスク アクション TODO 担当 期限 次回 決定事項"
+    if not query:
+        query = "タスク アクション TODO 担当 期限 次回 決定事項"
     query_embedding = get_embedding(query)
 
     # ChromaDBのwhereフィルタで議事録のチャンクだけに絞る
@@ -40,10 +43,10 @@ def register_minutes(minutes_id: str, minutes_text: str, filename: str):
     return {"minutes_id": minutes_id, "chunks": len(chunks)}
 
 
-def extract_tasks_from_minutes(minutes_ids: list[str], user_id: str):
+def extract_tasks_from_minutes(minutes_ids: list[str], user_id: str, query: str = ""):
     """選択された議事録からタスクを抽出してDBに保存"""
     # 1. 各議事録のチャンクをベクトル検索で取得
-    chunks = search_minutes_chunks(minutes_ids)
+    chunks = search_minutes_chunks(minutes_ids, query)
     if not chunks:
         return {"tasks_created": 0, "error": "関連するチャンクが見つかりません"}
 
@@ -52,7 +55,7 @@ def extract_tasks_from_minutes(minutes_ids: list[str], user_id: str):
 
     # 3. AIのレスポンス(JSON文字列)をパース
     ai_client = _get_ai_client()
-    prompt = f"""以下の議事録から、タスク・TODO・悪所内てむを全て抽出してください。
+    prompt = f"""以下の議事録から、タスク・TODO・アクションアイテムを全て抽出してください。
 
 JSON配列で返してください。各要素は以下の形式です:
 [
@@ -60,7 +63,7 @@ JSON配列で返してください。各要素は以下の形式です:
         "title": "タスクのタイトル",
         "description": "タスクの詳細説明",
         "priority": "high" または "medium" または "low",
-        "due_date": "YYY-MM-DD" または null
+        "due_date": "YYYY-MM-DD" または null
     }}
 ]
 
@@ -71,7 +74,7 @@ JSON配列のみを返してください。説明文は不要です。
 """
 
     response = ai_client.chat.completions.create(
-        model=os.getenv("AZURE_OPEM_DEVELOPMEMT"),
+        model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
         messages=[
             {
                 "role": "system",
