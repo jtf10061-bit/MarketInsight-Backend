@@ -15,6 +15,7 @@ from fastapi.middleware.cors import (
 # （これがないとブラウザのセキュリティ機能で通信がブロックされてしまうため）
 from fastapi.responses import StreamingResponse  # レスポンスを一括ではなくストリーミングで返す
 from pydantic import BaseModel
+from marketinsight_backend.minutes_rag import register_minutes, extract_tasks_from_minutes
 
 """
 リクエストのバリデーション（型チェック）用。ChatRequest で message: str と定義すると、FastAPIが自動的に:
@@ -136,6 +137,11 @@ class UpdateTaskRequest(BaseModel):
     priority: str = ""
     due_date: str = ""
     order_index: int = -1
+
+
+class ExtractTasksRequest(BaseModel):
+    minutes_ids: list[str]
+    user_id: str = "test-user"
 
 
 # UPLOAD_DIR: アップロード先のフォルダ(MarketInsight-Backend/uploads/)
@@ -543,3 +549,23 @@ def api_update_task(task_id: str, req: UpdateTaskRequest):
 def api_delete_task(task_id: str, user_id: str = "test-user"):
     # 内部関数delete_taskを呼び出し、指定したタスクIDとユーザーIDを渡して、削除処理を実行し、結果を返す
     return delete_task(task_id, user_id)
+
+
+# --- 議事録タスク抽出RAG ---
+# 議事録をベクトルDBに登録
+@app.post("/minutes-rag/register/{minutes_id}")
+def api_register_minutes(minutes_id: str):
+    from marketinsight_backend.minutes import get_minutesdetail
+
+    detail = get_minutesdetail(minutes_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="議事録が見つかりません")
+    result = register_minutes(minutes_id, detail["minutes"], detail["filename"])
+    return result
+
+
+# 議事録からタスクを抽出
+@app.post("/minutes-rag/extract-tasks")
+def api_extract_tasks(req: ExtractTasksRequest):
+    result = extract_tasks_from_minutes(req.minutes_ids, req.user_id)
+    return result
