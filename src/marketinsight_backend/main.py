@@ -142,6 +142,7 @@ class UpdateTaskRequest(BaseModel):
 class ExtractTasksRequest(BaseModel):
     minutes_ids: list[str]
     user_id: str = "test-user"
+    query: str = ""
 
 
 # UPLOAD_DIR: アップロード先のフォルダ(MarketInsight-Backend/uploads/)
@@ -567,5 +568,5 @@ def api_register_minutes(minutes_id: str):
 # 議事録からタスクを抽出
 @app.post("/minutes-rag/extract-tasks")
 def api_extract_tasks(req: ExtractTasksRequest):
-    result = extract_tasks_from_minutes(req.minutes_ids, req.user_id)
+    result = extract_tasks_from_minutes(req.minutes_ids, req.user_id, req.query)
     return result
