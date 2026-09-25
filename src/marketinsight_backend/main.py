@@ -51,6 +51,13 @@ from marketinsight_backend.minutes import (
 )
 import uuid
 
+from marketinsight_backend.tasks import (
+    get_tasks,
+    create_task,
+    update_task,
+    delete_task,
+)
+
 
 """
 FastAPIは
@@ -83,6 +90,7 @@ app.add_middleware(
 # history = []
 
 
+# Classの役割: FastAPIでは、リクエストのJSONボディを受け取るにはクラス(BaseModel)が必要。JSONを受け取るためにどんなフィールドがあり、型は何かを定義する
 class ChatRequest(BaseModel):
     message: str
     chat_id: str = ""
@@ -111,6 +119,23 @@ class RagQueryRequests(BaseModel):
     model: str = "aoai-gpt-4.1-mini"
     user_id: str = ""
     mode: str = "search"
+
+
+class CreateTaskRequest(BaseModel):
+    title: str
+    description: str = ""
+    priority: str = "medium"
+    due_date: str | None = None
+    user_id: str = "test-user"
+
+
+class UpdateTaskRequest(BaseModel):
+    status: str = ""
+    title: str = ""
+    description: str = ""
+    priority: str = ""
+    due_date: str = ""
+    order_index: int = -1
 
 
 # UPLOAD_DIR: アップロード先のフォルダ(MarketInsight-Backend/uploads/)
@@ -391,6 +416,7 @@ def rag_search(req: RagQueryRequests):
 
 # --- 議事録: 音声アップロード + 文字起こし + 議事録生成 ---
 @app.post("/minutes/upload")
+# async: この関数は途中で待てると言う宣言。
 async def upload_audio(
     file: UploadFile = File(...),
     user_id: str = Form("test-user"),
@@ -412,7 +438,7 @@ async def upload_audio(
 
 
 @app.get("/minutes/status/{job_id}")
-async def minutes_status(job_id: str):
+def minutes_status(job_id: str):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job Not Found")
@@ -420,7 +446,7 @@ async def minutes_status(job_id: str):
 
 
 @app.get("/minutes/result/{job_id}")
-async def minutes_result(job_id: str):
+def minutes_result(job_id: str):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job Not Found")
@@ -430,13 +456,13 @@ async def minutes_result(job_id: str):
 
 
 @app.get("/minutes/history/{user_id}")
-async def minutes_history(user_id: str):
+def minutes_history(user_id: str):
     result = get_minutes_history(user_id)
     return result
 
 
 @app.get("/minutes/{minutes_id}")
-async def minutes_detail(minutes_id: str):
+def minutes_detail(minutes_id: str):
     result = get_minutesdetail(minutes_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Minutes not Found")
@@ -444,24 +470,24 @@ async def minutes_detail(minutes_id: str):
 
 
 @app.delete("/minutes/{minutes_id}")
-async def minutes_delete(minutes_id: str):
+def minutes_delete(minutes_id: str):
     delete_minutes(minutes_id)
     return {"status": "ok"}
 
 
 @app.post("/rag/summarize")
-async def rag_summarize(body: dict):
+def rag_summarize(body: dict):
     result = summarize_document(body["filename"], body["user_id"])
     return result
 
 
 @app.get("/rag/summary/history/{user_id}")
-async def rag_summary_history(user_id: str):
+def rag_summary_history(user_id: str):
     return get_summary_history(user_id)
 
 
 @app.get("/rag/summary/{summary_id}")
-async def rag_summary_detail(summary_id: str):
+def rag_summary_detail(summary_id: str):
     result = get_summary_detail(summary_id)
     if result is None:
         return {"error": "Not Found"}
@@ -469,6 +495,51 @@ async def rag_summary_detail(summary_id: str):
 
 
 @app.delete("/rag/summary/{summary_id}")
-async def rag_summary_delete(summary_id: str, user_id: str = "test-user"):
+def rag_summary_delete(summary_id: str, user_id: str = "test-user"):
     delete_summary(summary_id, user_id)
     return {"status": "deleted"}
+
+
+# --- タスクを管理 ---
+# タスク一覧を取得: 指定したユーザーのタスク一覧を返すエンドポイント
+@app.get("/tasks/{user_id}")
+# 非同期関数として定義しており、URLから受け取ったuser_id(文字列)を引数に取る
+def api_get_tasks(user_id: str):
+    # DB操作などを行う内部関数get_tasksと呼び出し、取得したタスクのデータをそのままレスポンス(JSON形式)として返す
+    return get_tasks(user_id)
+
+
+# タスクの新規作成
+@app.post("/tasks/")
+# リクエストボディ(JOSNデータ)をPydanticモデルであるCreateChatRequest型のデータとsちえ受け取る(自動でバリデーションが行われる)
+def api_create_task(req: CreateTaskRequest):
+    # リクエストから取り出した各種パラメータを内部関数create_taskに渡し、タスクを作成する
+    task = create_task(req.user_id, req.title, req.description, req.priority, req.due_date)
+    return task
+
+
+# タスクの更新
+@app.patch("/tasks/{task_id}")
+# 既存タスクの一部フィールドを部分更新する
+def api_update_task(task_id: str, req: UpdateTaskRequest):
+    # リクエストオブジェクトreqを辞書型に変換(req.dict())する
+    # ない方表記を用いて、値が空文字や未指定を表すデフォルト値(-1)ではない項目だけ抽出し、更新用辞書updatesを作成する
+    updates = {k: v for k, v in req.dict().items() if v != "" and v != -1}
+    # reault = update_task(taskid, updates): 更新対象のタスクIDと抽出した更新データ(updates)を渡して、内部関数update_taskを実行する
+    result = update_task(task_id, updates)
+    # if result is None: 対象のタスクが存在しなかった場合
+    if result is None:
+        # raise HTTPException(status_code=404, detail="Task not found"): HTTPステータスコード404 Not Foundの例外を発生させ、クライアントにエラーを通史する
+        raise HTTPException(status_code=404, detail="Task not found")
+    # 更新完了後のタスクデータを返す
+    return result
+
+
+# タスクの削除
+@app.delete("/tasks/{task_id}")
+# DELETEリクエストを処理する
+# user_id: str = "test-user": クエリパラメータからuser_idを受け取る。
+# パラメータが指定されていない場合はデフォルト値として、"test-userが設定される
+def api_delete_task(task_id: str, user_id: str = "test-user"):
+    # 内部関数delete_taskを呼び出し、指定したタスクIDとユーザーIDを渡して、削除処理を実行し、結果を返す
+    return delete_task(task_id, user_id)
