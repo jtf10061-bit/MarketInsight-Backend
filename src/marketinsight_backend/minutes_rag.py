@@ -1,5 +1,5 @@
 from marketinsight_backend.rag import split_text_into_chunks, save_chunks, get_embedding, collection
-from marketinsight_backend.minutes import _get_ai_client
+from marketinsight_backend.minutes import _get_ai_client, _get_cosmos_container
 from marketinsight_backend.tasks import create_task
 import os
 import json
