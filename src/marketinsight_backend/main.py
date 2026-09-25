@@ -59,6 +59,7 @@ from marketinsight_backend.tasks import (
     delete_task,
 )
 
+from marketinsight_backend.minutes import _get_ai_client
 
 """
 FastAPIは
@@ -143,6 +144,11 @@ class ExtractTasksRequest(BaseModel):
     minutes_ids: list[str]
     user_id: str = "test-user"
     query: str = ""
+
+
+class DocumentQARequest(BaseModel):
+    question: str
+    user_id: str
 
 
 # UPLOAD_DIR: アップロード先のフォルダ(MarketInsight-Backend/uploads/)
@@ -570,3 +576,31 @@ def api_register_minutes(minutes_id: str):
 def api_extract_tasks(req: ExtractTasksRequest):
     result = extract_tasks_from_minutes(req.minutes_ids, req.user_id, req.query)
     return result
+
+
+# ドキュメント横断QA
+@app.post("/document-qa")
+def api_document_qa(req: DocumentQARequest):
+    chunks = search_documents(req.question)
+
+    if not chunks:
+        return {"answer": "関連するドキュメントが見つかりませんでした。", "sources": []}
+
+    context = "\n\n".join(c["content"] for c in chunks)
+    sources = list(set(c["filename"] for c in chunks))
+
+    ai_client = _get_ai_client()
+    response = ai_client.chat.completions.create(
+        model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+        messages=[
+            {
+                "role": "system",
+                "content": "あなたはドキュメントQAアシスタントです。提供されたコンテキストのみに基づいて回答してください。コンテキストに情報がない場合は「該当する情報が見つかりません」と答えてください。回答はMarkdown形式で、見出し・箇条書き・太字を使って読みやすく整形してください。",
+            },
+            {"role": "user", "content": f"## コンテキスト:\n{context}\n\n## 質問:\n{req.question}"},
+        ],
+        temperature=0.1,
+    )
+
+    answer = response.choices[0].message.content
+    return {"answer": answer, "sources": sources}
