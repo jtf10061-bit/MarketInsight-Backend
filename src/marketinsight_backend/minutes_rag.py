@@ -1,6 +1,7 @@
 from marketinsight_backend.rag import split_text_into_chunks, save_chunks, get_embedding, collection
-from marketinsight_backend.minutes import _get_ai_client, _get_cosmos_container
+from marketinsight_backend.minutes import _get_ai_client
 from marketinsight_backend.tasks import create_task
+from marketinsight_backend.minutes import _get_cosmos_container
 import os
 import json
 
@@ -45,17 +46,27 @@ def register_minutes(minutes_id: str, minutes_text: str, filename: str):
 
 def extract_tasks_from_minutes(minutes_ids: list[str], user_id: str, query: str = ""):
     """選択された議事録からタスクを抽出してDBに保存"""
-    # 1. 各議事録のチャンクをベクトル検索で取得
-    chunks = search_minutes_chunks(minutes_ids, query)
-    if not chunks:
-        return {"tasks_created": 0, "error": "関連するチャンクが見つかりません"}
-
-    # 2. 取得したチャンクをコンテキストにして、AIにタスク抽出を依頼
-    context = "\n\n".join(chunks)
-
-    # 3. AIのレスポンス(JSON文字列)をパース
+    minutes_container = _get_cosmos_container()
     ai_client = _get_ai_client()
-    prompt = f"""以下の議事録から、タスク・TODO・アクションアイテムを全て抽出してください。
+    created = 0
+
+    for mid in minutes_ids:
+        # 1. この議事録のソースラベルを取得
+        try:
+            item = minutes_container.read_item(item=mid, partition_key=user_id)
+            c = item.get("created_at", "")
+            source = f"音声議事録 {c[:10]}" if c else "音声議事録 日付不明"
+        except Exception:
+            source = "音声議事録 日付不明"
+
+        # 2. この議事録のチャンクをベクトル検索
+        mid_chunks = search_minutes_chunks([mid], query)
+        if not mid_chunks:
+            continue
+
+        # 3. AIにタスク抽出を依頼
+        context = "\n\n".join(mid_chunks)
+        prompt = f"""以下の議事録から、タスク・TODO・アクションアイテムを全て抽出してください。
 
 JSON配列で返してください。各要素は以下の形式です:
 [
@@ -78,37 +89,37 @@ JSON配列のみを返してください。説明文は不要です。
 {context}
 """
 
-    response = ai_client.chat.completions.create(
-        model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-        messages=[
-            {
-                "role": "system",
-                "content": "あなたはタスク抽出の専門家です。議事録からアクションアイテムを正確に抽出してください。",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.1,
-    )
-
-    # 4. 各タスクをcreate_task() で保存
-    raw = response.choices[0].message.content
-    # ```json...```で囲まれている場合に対応
-    if "```" in raw:
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    task_list = json.loads(raw.strip())
-
-    # 5. 各タスクをcreate_task()で保存
-    created = 0
-    for t in task_list:
-        create_task(
-            user_id=user_id,
-            title=t["title"],
-            description=t.get("description", ""),
-            priority=t.get("priority", "medium"),
-            due_date=t.get("due_date"),
+        response = ai_client.chat.completions.create(
+            model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            messages=[
+                {
+                    "role": "system",
+                    "content": "あなたはタスク抽出の専門家です。議事録からアクションアイテムを正確に抽出してください。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
         )
-        created += 1
+
+        # 4. レスポンスをパース
+        raw = response.choices[0].message.content
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        task_list = json.loads(raw.strip())
+
+        # 5. 各タスクをcreate_taskで保存
+        for t in task_list:
+            result = create_task(
+                user_id=user_id,
+                title=t["title"],
+                description=t.get("description", ""),
+                priority=t.get("priority", "medium"),
+                due_date=t.get("due_date"),
+                source=source,
+            )
+            if result is not None:
+                created += 1
 
     return {"task_created": created}
