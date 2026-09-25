@@ -604,3 +604,39 @@ def api_document_qa(req: DocumentQARequest):
 
     answer = response.choices[0].message.content
     return {"answer": answer, "sources": sources}
+
+
+# --- ドキュメントQA セッション管理 ---
+def _get_qa_sessions_container():
+    from marketinsight_backend.rag import cosmos_client
+
+    database = cosmos_client.get_database_client("history")
+    return database.get_container_client("qa_sessions")
+
+
+@app.get("/qa-sessions/{user_id}")
+def get_qa_sessions(user_id: str):
+    container = _get_qa_sessions_container()
+    query = "SELECT * FROM c WHERE c.user_id = @uid ORDER BY c.created_at DESC"
+    items = list(
+        container.query_items(
+            query=query,
+            parameters=[{"name": "@uid", "value": user_id}],
+            enable_cross_partition_query=True,
+        )
+    )
+    return items
+
+
+@app.post("/qa-sessions")
+def save_qa_session(req: dict):
+    container = _get_qa_sessions_container()
+    container.upsert_item(req)
+    return {"status": "saved"}
+
+
+@app.delete("/qa-sessions/{session_id}/{user_id}")
+def delete_qa_session(session_id: str, user_id: str):
+    container = _get_qa_sessions_container()
+    container.delete_item(session_id, partition_key=user_id)
+    return {"status": "deleted"}
