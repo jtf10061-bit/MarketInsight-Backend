@@ -510,7 +510,7 @@ def api_get_tasks(user_id: str):
 
 
 # タスクの新規作成
-@app.post("/tasks/")
+@app.post("/tasks")
 # リクエストボディ(JOSNデータ)をPydanticモデルであるCreateChatRequest型のデータとsちえ受け取る(自動でバリデーションが行われる)
 def api_create_task(req: CreateTaskRequest):
     # リクエストから取り出した各種パラメータを内部関数create_taskに渡し、タスクを作成する
