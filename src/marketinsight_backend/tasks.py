@@ -30,10 +30,20 @@ def get_tasks(user_id: str) -> list[dict]:
 
 # --- 2. タスク作成 ---
 def create_task(
-    user_id: str, title: str, description: str = "", priority: str = "medium", due_date: str = "", source: str = ""
+    user_id: str,
+    title: str,
+    description: str = "",
+    priority: str = "medium",
+    due_date: str = "",
+    source: str = "",
 ) -> dict:
     container = _get_cosmos_container()
     existing = get_tasks(user_id)
+
+    # 同じタイトルのタスクが既にあればスキップ
+    if any(t["title"] == title for t in existing):
+        return None
+
     next_index = max((t["order_index"] for t in existing), default=-1) + 1
     task = {
         "id": str(uuid.uuid4()),
