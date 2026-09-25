@@ -30,7 +30,7 @@ def get_tasks(user_id: str) -> list[dict]:
 
 # --- 2. タスク作成 ---
 def create_task(
-    user_id: str, title: str, description: str = "", priority: str = "medium", due_date: str = ""
+    user_id: str, title: str, description: str = "", priority: str = "medium", due_date: str = "", source: str = ""
 ) -> dict:
     container = _get_cosmos_container()
     existing = get_tasks(user_id)
@@ -43,6 +43,7 @@ def create_task(
         "status": "todo",
         "priority": priority,
         "due_date": due_date,
+        "source": source,
         "created_at": datetime.utcnow().isoformat(),
         "order_index": next_index,
     }
