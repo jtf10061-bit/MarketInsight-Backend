@@ -33,6 +33,8 @@ def create_task(
     user_id: str, title: str, description: str = "", priority: str = "medium", due_date: str = ""
 ) -> dict:
     container = _get_cosmos_container()
+    existing = get_tasks(user_id)
+    next_index = max((t["order_index"] for t in existing), default=-1) + 1
     task = {
         "id": str(uuid.uuid4()),
         "user_id": user_id,
@@ -42,7 +44,7 @@ def create_task(
         "priority": priority,
         "due_date": due_date,
         "created_at": datetime.utcnow().isoformat(),
-        "order_index": 0,
+        "order_index": next_index,
     }
     container.upsert_item(task)
     return task
@@ -60,7 +62,7 @@ def update_task(task_id: str, updates: dict) -> dict | None:
             enable_cross_partition_query=True,
         )
     )
-    if not items[0]:
+    if not items:
         return None
     # 2. 取得したタスクにupdateの内容を上書き
     task = items[0]
